@@ -1,16 +1,16 @@
 #include <iostream>
+#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include "static_switch.h"
 #include <cuda.h>
-#include <cuda_runtime.h>
 #include <cute/tensor.hpp>
-#include <iostream>
-#include <iomanip>
-#include <utility>
-#include <type_traits>
 #include <vector>
 #include <random>
 #include <numeric>
 #include <cutlass/cutlass.h>
 #include <cutlass/numeric_types.h>
+#include <cutlass/numeric_conversion.h>
 #include <cute/tensor.hpp>
 #include <cutlass/trace.h>
 
@@ -30,8 +30,19 @@
 
 using namespace cute;
 
+
+template <typename To_type, typename Engine, typename Layout>
+__forceinline__ __device__ auto convert_type(Tensor<Engine, Layout> const &tensor) {
+    using From_type = typename Engine::value_type;
+    constexpr int numel = decltype(size(tensor))::value;
+    cutlass::NumericArrayConverter<To_type, From_type, numel> convert_op;
+    // HACK: this requires tensor to be "contiguous"
+    auto frag = convert_op(*reinterpret_cast<const cutlass::Array<From_type, numel> *>(tensor.data()));
+    return make_tensor(make_rmem_ptr<To_type>(&frag), tensor.layout());
+}
+
 template <typename Kernel_traits>
-__global__ void qk_matmul(void* q, void* k) {
+__global__ void qk_matmul_kernel(void* q, void* k, void* o) {
     using T = typename Kernel_traits::T;
     constexpr int M = Kernel_traits::kTileM;
     constexpr int N = Kernel_traits::kTileN;
@@ -134,6 +145,7 @@ __global__ void qk_matmul(void* q, void* k) {
         printf("tCrB_copy_view: "); print(tCrB_copy_view); printf("\n");
         print_tensor(tCrB_copy_view);
     }
+
     #pragma unroll
     for (int i = 0; i < size<2>(tSrQ); ++i) {
         if (i < size<2>(tSrQ) - 1) {
@@ -143,7 +155,65 @@ __global__ void qk_matmul(void* q, void* k) {
         cute::gemm(tiled_mma, tSrQ(_, _, i), tSrK(_, _, i), acc_s);
     }
 
+    __syncthreads();
+
+    if (thread0()) {
+        printf("acc_s: "); print(acc_s); print("\n");
+        print_tensor(acc_s);
+    }
+
+    // Convert acc_s from fp32 to fp16/bf16
+    Tensor rO = make_fragment_like<T>(acc_s.layout());
+    for (int i = 0; i < size(rO); i++) {
+        rO[i] = static_cast<T>(acc_s[i]);
+    }
+
+    if (thread0()) {
+        printf("rO: "); print(rO); print("\n");
+        print_tensor(rO);
+    }
+    Tensor sO = make_tensor(sQ.data(), typename Kernel_traits::SmemLayoutO{});    // (SMEM_M,SMEM_N)
+    auto smem_tiled_copy_O = make_tiled_copy_C(typename Kernel_traits::SmemCopyAtomO{}, tiled_mma);
+    auto smem_thr_copy_O = smem_tiled_copy_O.get_thread_slice(idx);
+    Tensor taccOrO = smem_thr_copy_O.retile_S(rO);        // ((Atom,AtomNum), MMA_M, MMA_N)
+    Tensor taccOsO = smem_thr_copy_O.partition_D(sO);     // ((Atom,AtomNum),PIPE_M,PIPE_N)
+    if (thread0()) {
+        printf("sO: "); print(sO); print("\n");
+        printf("taccOrO: "); print(taccOrO); print("\n");
+        printf("taccOsO: "); print(taccOsO); print("\n");
+    }
+    // copy to shared memory
+    cute::copy(smem_tiled_copy_O, taccOrO, taccOsO);
+
+    __syncthreads();
+
+    if (thread0()) {
+        printf("sO: \n");
+        print_tensor(sO);
+    }
+
     
+    // shared memory to register
+    Tensor gO = make_tensor(make_gmem_ptr(reinterpret_cast<T*>(o)),
+                    make_shape(Int<M>{}, Int<N>{}),
+                    make_stride(Int<N>{}, Int<1>{}));
+    
+    typename Kernel_traits::GmemTiledCopyO gmem_tiled_copy_O;
+    auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(idx);
+    Tensor tOsO = gmem_thr_copy_O.partition_S(sO);        // ((Atom,AtomNum),ATOM_M,ATOM_N)
+    Tensor tOgO = gmem_thr_copy_O.partition_D(gO);
+    
+    __syncthreads();
+    
+    Tensor tOrO = make_tensor<T>(shape(tOgO));
+    cute::copy(gmem_tiled_copy_O, tOsO, tOrO);
+
+    for (int m = 0; m < size<1>(tOrO); m++) {
+        for (int k = 0; k < size<2>(tOrO); k++) {
+            cute::copy(gmem_tiled_copy_O, tOrO(_, m, k), tOgO(_, m, k));
+        }
+    }
+
 }
 
 
@@ -202,20 +272,24 @@ struct Kernel_traits {
         composition(SmemLayoutKV{}, make_layout(Shape<Int<kTileK>, Int<kTileN>>{}, GenRowMajor{})));
   using SmemLayoutVtransposedNoSwizzle = decltype(get_nonswizzle_portion(SmemLayoutVtransposed{}));
 
+  /*
   using SmemLayoutAtomO = decltype(
         composition(Swizzle<3, 3, 3>{},
                     Layout<Shape<Int<8>, Int<64>>,
                            Stride<Int<64>, _1>>{}));
+  */
+  using SmemLayoutAtomO = Layout<Shape<Int<8>, Int<64>>,
+                           Stride<Int<64>, _1>>;
   using SmemLayoutO = decltype(tile_to_shape(
         SmemLayoutAtomO{},
-        Shape<Int<kTileM>, Int<kTileK>>{}));
+        Shape<Int<kTileM>, Int<kTileN>>{}));
 
   // shared memory to register copy
   using SmemCopyAtom = Copy_Atom<SM75_U32x4_LDSM_N, T>;
   using SmemCopyAtomTransposed = Copy_Atom<SM75_U16x8_LDSM_T, T>; 
 
   
-  using SmemCopyAtomO = Copy_Atom<DefaultCopy, T>;
+  using SmemCopyAtomO = Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, T>;
   
   // tiled mma
   using TiledMma = TiledMMA<
@@ -228,12 +302,11 @@ struct Kernel_traits {
   static constexpr int kSmemSize = kSmemQSize + kSmemKVSize;
 };
 
-
+/*
 int main(void) {
-    using namespace cute;
-    using T = cute::half_t;
+    using T = cutlass::half_t;
     std::mt19937 gen(20250102);
-    std::uniform_real_distribution<float> dis(static_cast<float>(-100), static_cast<float>(100));
+    std::uniform_real_distribution<float> dis(static_cast<float>(-1), static_cast<float>(1));
     constexpr int M = 128;
     constexpr int N = 64;
     constexpr int K = 128;
@@ -266,6 +339,10 @@ int main(void) {
     cudaMalloc(&d_k, N * K * sizeof(T));
     cudaMemcpy(d_k, h_k, sizeof(T) * N * K, cudaMemcpyHostToDevice);
 
+    T* d_o = nullptr;
+    T* h_o = (T*)malloc(M * N * sizeof(T));
+    cudaMalloc(&d_o, M * N * sizeof(T));
+
     Kernel_traits<T, M, N, K> config;
 
     auto kernel = &qk_matmul<decltype(config)>;
@@ -274,9 +351,11 @@ int main(void) {
     if (smem_size >= 48 * 1024) {
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
     }
-    kernel<<<1, config.kNThreads, smem_size>>>(d_q, d_k);
-    
+    kernel<<<1, config.kNThreads, smem_size>>>(d_q, d_k, d_o);
+    cudaMemcpy(h_o, d_o, M * N * sizeof(T), cudaMemcpyDeviceToHost);
+
     cudaDeviceSynchronize();
+
     auto err = cudaGetLastError();
     printf("Copy done, Error Code: %d, State: %s\n", err, cudaGetErrorString(err));
 
@@ -284,4 +363,47 @@ int main(void) {
     cudaFree(d_k);
 
     return 0;
+}
+*/
+
+
+template <typename T>
+void qk_matmul_kernel_launch(const at::Tensor& q, const at::Tensor& k, at::Tensor& o) {
+    const int M = q.size(0);
+    const int K = q.size(1);
+    const int N = k.size(0);
+    printf("m %d, n %d, k %d\n", M, N, K);
+    TORCH_CHECK(K == 128, "only support k == 128");
+    void* __restrict__ q_ptr = q.data_ptr();
+    void* __restrict__ k_ptr = k.data_ptr();
+    void * __restrict__ o_ptr = o.data_ptr();
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    Kernel_traits<T, 128, 64, 128> config;
+    auto kernel = &qk_matmul_kernel<decltype(config)>;
+    const int smem_size = config.kSmemSize;
+    printf("smem_size is %d\n", smem_size);
+    if (smem_size >= 48 * 1024) {
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+    }
+    kernel<<<1, config.kNThreads, smem_size, stream>>>(q_ptr, k_ptr, o_ptr);
+}
+
+
+
+void qk_matmul(
+    const at::Tensor& q,
+    const at::Tensor& k,
+    at::Tensor& o
+) {
+    at::cuda::CUDAGuard device_guard{q.device()};
+    auto q_dtype = q.dtype();
+    TORCH_CHECK(q_dtype == torch::kFloat16 || q_dtype == torch::kBFloat16, "only support fp16 and bf16 data type");
+    TORCH_CHECK(k.dtype() == q_dtype, "query and key must have the same dtype");
+    TORCH_CHECK(q.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+    TORCH_CHECK(k.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+     
+    FP16_SWITCH(q_dtype != torch::kBFloat16, [&] {
+        qk_matmul_kernel_launch<elem_type>(q, k, o);
+    });
+
 }
