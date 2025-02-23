@@ -15,31 +15,8 @@
 #include <cutlass/trace.h>
 
 
-#define CUCHECK(cmd)                                                                                                   \
-    do                                                                                                                 \
-    {                                                                                                                  \
-        CUresult retval = cmd;                                                                                         \
-        if (retval != CUDA_SUCCESS)                                                                                    \
-        {                                                                                                              \
-            const char* error_string;                                                                                  \
-            cuGetErrorString(retval, &error_string);                                                                   \
-            printf("Failed: Cuda error %s:%d '%s'\n", __FILE__, __LINE__, error_string);                               \
-            exit(EXIT_FAILURE);                                                                                        \
-        }                                                                                                              \
-    } while (0)
-
 using namespace cute;
 
-
-template <typename To_type, typename Engine, typename Layout>
-__forceinline__ __device__ auto convert_type(Tensor<Engine, Layout> const &tensor) {
-    using From_type = typename Engine::value_type;
-    constexpr int numel = decltype(size(tensor))::value;
-    cutlass::NumericArrayConverter<To_type, From_type, numel> convert_op;
-    // HACK: this requires tensor to be "contiguous"
-    auto frag = convert_op(*reinterpret_cast<const cutlass::Array<From_type, numel> *>(tensor.data()));
-    return make_tensor(make_rmem_ptr<To_type>(&frag), tensor.layout());
-}
 
 template <typename Kernel_traits>
 __global__ void qk_matmul_kernel(void* q, void* k, void* o) {
@@ -163,10 +140,9 @@ __global__ void qk_matmul_kernel(void* q, void* k, void* o) {
     }
 
     // Convert acc_s from fp32 to fp16/bf16
-    Tensor rO = make_fragment_like<T>(acc_s.layout());
-    for (int i = 0; i < size(rO); i++) {
-        rO[i] = static_cast<T>(acc_s[i]);
-    }
+    cutlass::NumericArrayConverter<T, float, 64> convert_op;
+    auto frag = convert_op(*reinterpret_cast<const cutlass::Array<float, 64> *>(acc_s.data()));
+    Tensor rO = make_tensor(make_rmem_ptr<T>(&frag), acc_s.layout());
 
     if (thread0()) {
         printf("rO: "); print(rO); print("\n");
@@ -302,69 +278,6 @@ struct Kernel_traits {
   static constexpr int kSmemSize = kSmemQSize + kSmemKVSize;
 };
 
-/*
-int main(void) {
-    using T = cutlass::half_t;
-    std::mt19937 gen(20250102);
-    std::uniform_real_distribution<float> dis(static_cast<float>(-1), static_cast<float>(1));
-    constexpr int M = 128;
-    constexpr int N = 64;
-    constexpr int K = 128;
-    int mcSupport = 0;
-    int cudaDev;
-    CUdevice currentDev;
-    cudaGetDevice(&cudaDev);
-    cuDeviceGet(&currentDev, cudaDev);
-    CUCHECK(cuDeviceGetAttribute(&mcSupport, CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, currentDev));
-    printf("mcSupport is %d\n", mcSupport);
-    // q
-    T* h_q = (T*)malloc(M * K * sizeof(T));
-    for (int i = 0; i < M * K; i++) {
-        float data = dis(gen);
-        h_q[i] = T(data);
-    }
-    T* d_q = nullptr;
-    cudaMalloc(&d_q, M * K * sizeof(T));
-    cudaMemcpy(d_q, h_q, sizeof(T) * M * K, cudaMemcpyHostToDevice);
-    printf("-------------------------------------------------------------------\n");
-
-    // k
-    std::mt19937 genk(20250102 + 1);
-    T* h_k = (T*)malloc(N * K * sizeof(T));
-    for (int i = 0; i < N * K; i++) {
-        float data = dis(genk);
-        h_k[i] = T(data);
-    }
-    T* d_k = nullptr;
-    cudaMalloc(&d_k, N * K * sizeof(T));
-    cudaMemcpy(d_k, h_k, sizeof(T) * N * K, cudaMemcpyHostToDevice);
-
-    T* d_o = nullptr;
-    T* h_o = (T*)malloc(M * N * sizeof(T));
-    cudaMalloc(&d_o, M * N * sizeof(T));
-
-    Kernel_traits<T, M, N, K> config;
-
-    auto kernel = &qk_matmul<decltype(config)>;
-    const int smem_size = config.kSmemSize;
-    printf("smem_size is %d\n", smem_size);
-    if (smem_size >= 48 * 1024) {
-        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
-    }
-    kernel<<<1, config.kNThreads, smem_size>>>(d_q, d_k, d_o);
-    cudaMemcpy(h_o, d_o, M * N * sizeof(T), cudaMemcpyDeviceToHost);
-
-    cudaDeviceSynchronize();
-
-    auto err = cudaGetLastError();
-    printf("Copy done, Error Code: %d, State: %s\n", err, cudaGetErrorString(err));
-
-    cudaFree(d_q);
-    cudaFree(d_k);
-
-    return 0;
-}
-*/
 
 
 template <typename T>
@@ -387,7 +300,6 @@ void qk_matmul_kernel_launch(const at::Tensor& q, const at::Tensor& k, at::Tenso
     }
     kernel<<<1, config.kNThreads, smem_size, stream>>>(q_ptr, k_ptr, o_ptr);
 }
-
 
 
 void qk_matmul(

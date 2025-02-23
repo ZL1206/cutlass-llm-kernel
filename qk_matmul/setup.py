@@ -39,7 +39,6 @@ NVCC_FLAGS += [
                "-O3", 
                "-std=c++17", 
                "--use_fast_math", 
-               "--expt-relaxed-constexpr", 
                "--expt-extended-lambda", 
                "--expt-relaxed-constexpr", 
                "-U__CUDA_NO_HALF_OPERATORS__",
@@ -72,7 +71,7 @@ class NinjaBuildExtension(BuildExtension):
         super().__init__(*args, **kwargs)
 
 setup(
-    name="cutlass_llm_kernel",
+    name="qk_matmul",
     ext_modules=[
         CUDAExtension(
             name="qk_matmul_ops",
