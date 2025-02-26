@@ -24,8 +24,8 @@ int main(void) {
         Layout<Shape<Int<4>,_1,_1>>,  // 4x1x1 or 8x1x1 thread group
         Tile<Int<16 * 4>, _16, _16>>;
     
-    using A = Layout< Shape<Shape<Int<2>, Int<2>, Int<2>>, Int<2>, Shape<Shape<Int<2>, Int<2>>, Int<2>>>,
-                     Stride<Stride<Int<1>, Int<0>>, Int<2048>> >;
+    using A = Layout< Shape< Shape<Int<2>, Int<2>>, Shape<Int<2>, Int<8>> >,
+                     Stride< Stride<Int<2>, Int<4>>, Stride<Int<1>, Int<8>> > >;
 
     
     //print_latex(A{});

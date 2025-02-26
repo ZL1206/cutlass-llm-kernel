@@ -9,12 +9,14 @@ head_size = 128
 query = torch.randn((seqlen_q, head_size), dtype=torch.float16, device="cuda")
 key = torch.randn((seqlen_k, head_size), dtype=torch.float16, device="cuda")
 out = torch.empty((seqlen_q, seqlen_k), dtype=torch.float16, device="cuda")
-out_ref = out.clone()
 
-qk_matmul_ops.qk_matmul(query, key, out)
+
+softmax_scale = head_size ** (-0.5) 
+qk_matmul_ops.qk_matmul(query, key, out, softmax_scale)
 
 out_ref = torch.matmul(query, key.t())
-
+out_ref = out_ref * softmax_scale
+out_ref = torch.softmax(out_ref, dim=-1)
 
 torch.cuda.synchronize()
 

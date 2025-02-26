@@ -4,7 +4,8 @@
 void qk_matmul(
     const at::Tensor& q,
     const at::Tensor& k,
-    at::Tensor& o
+    at::Tensor& o,
+    const float softmax_scale
 );
 
 
