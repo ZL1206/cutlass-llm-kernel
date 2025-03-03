@@ -27,9 +27,12 @@ int main(void) {
     using A = Layout< Shape< Shape<Int<2>, Int<2>>, Shape<Int<2>, Int<8>> >,
                      Stride< Stride<Int<2>, Int<4>>, Stride<Int<1>, Int<8>> > >;
 
+    using B = Layout< Shape<Int<128>, Int<64>>,
+                     Stride<Int<56>, Int<1>>>;
     
     //print_latex(A{});
     print_layout(A{});
+    print_layout(B{});
     
     
     return 0;

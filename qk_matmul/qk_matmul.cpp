@@ -5,7 +5,8 @@ void qk_matmul(
     const at::Tensor& q,
     const at::Tensor& k,
     at::Tensor& o,
-    const float softmax_scale
+    const float softmax_scale,
+    const bool is_causal
 );
 
 
