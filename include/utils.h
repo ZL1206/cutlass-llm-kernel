@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (c) 2023, Tri Dao.
+ ******************************************************************************/
+
 #pragma once
 
 #include <assert.h>
@@ -6,9 +10,7 @@
 
 #include <cuda_fp16.h>
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 #include <cuda_bf16.h>
-#endif
 
 #include <cute/tensor.hpp>
 
@@ -22,67 +24,6 @@
 namespace flash {
 
 using namespace cute;
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-template<typename T>
-__forceinline__ __device__ uint32_t relu2(const uint32_t x);
-
-template<>
-__forceinline__ __device__ uint32_t relu2<cutlass::half_t>(const uint32_t x) {
-    uint32_t res;
-    const uint32_t zero = 0u;
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-    asm volatile("max.f16x2 %0, %1, %2;\n" : "=r"(res) : "r"(x), "r"(zero));
-#else
-    asm volatile( \
-        "{\n" \
-        "\t .reg .f16x2 sela;\n" \
-        "\t set.gtu.u32.f16x2 sela, %1, %2;\n" \
-        "\t and.b32 %0, sela, %1;\n" 
-        "}\n" : "=r"(res) : "r"(x), "r"(zero));
-#endif
-    return res;
-}
-
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-template<>
-__forceinline__ __device__ uint32_t relu2<cutlass::bfloat16_t>(const uint32_t x) {
-    uint32_t res;
-    const uint32_t zero = 0u;
-    asm volatile("max.bf16x2 %0, %1, %2;\n" : "=r"(res) : "r"(x), "r"(zero));
-    return res;
-}
-#endif
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-
-template<typename T>
-__forceinline__ __device__ uint32_t convert_relu2(const float2 x);
-
-template<>
-__forceinline__ __device__ uint32_t convert_relu2<cutlass::half_t>(const float2 x) {
-    uint32_t res;
-    const uint32_t a = reinterpret_cast<const uint32_t&>(x.x);
-    const uint32_t b = reinterpret_cast<const uint32_t&>(x.y);
-    asm volatile("cvt.rn.relu.f16x2.f32 %0, %1, %2;\n" : "=r"(res) : "r"(b), "r"(a));
-    return res;
-}
-
-template<>
-__forceinline__ __device__ uint32_t convert_relu2<cutlass::bfloat16_t>(const float2 x) {
-    uint32_t res;
-    const uint32_t a = reinterpret_cast<const uint32_t&>(x.x);
-    const uint32_t b = reinterpret_cast<const uint32_t&>(x.y);
-    asm volatile("cvt.rn.relu.bf16x2.f32 %0, %1, %2;\n" : "=r"(res) : "r"(b), "r"(a));
-    return res;
-}
-
-#endif
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename T>
 struct MaxOp {
@@ -209,17 +150,6 @@ __forceinline__ __device__ auto convert_layout_acc_Aregs(Layout acc_layout) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-// Convert acc_layout from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
-template<typename Layout>
-__forceinline__ __device__ auto convert_layout_acc_dropout(Layout acc_layout) {
-    using X = Underscore;
-    static_assert(decltype(size<0>(acc_layout))::value == 4);
-    static_assert(decltype(rank(acc_layout))::value == 3);
-    auto l = logical_divide(acc_layout, Shape<X, X, _2>{});  // (4, MMA_M, (2, MMA_N / 2)))
-    return make_layout(make_layout(get<0>(l), get<2, 0>(l)), get<1>(l), get<2, 1>(l));
-};
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <typename To_type, typename Engine, typename Layout>
 __forceinline__ __device__ auto convert_type(Tensor<Engine, Layout> const &tensor) {
@@ -231,48 +161,9 @@ __forceinline__ __device__ auto convert_type(Tensor<Engine, Layout> const &tenso
     return make_tensor(make_rmem_ptr<To_type>(&frag), tensor.layout());
 }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-template <typename Engine, typename Layout>
-__forceinline__ __device__ void relu_(Tensor<Engine, Layout> &tensor) {
-    constexpr int numel = decltype(size(tensor))::value;
-    static_assert(numel % 2 == 0);
-    using value_t = typename Engine::value_type;
-    // HACK: this requires tensor to be "contiguous"
-    Tensor tensor_uint32 = recast<uint32_t>(tensor);
-    #pragma unroll
-    for (int i = 0; i < size(tensor_uint32); ++i) {
-        tensor_uint32(i) = relu2<value_t>(tensor_uint32(i));
-    }
-}
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-// On SM80 and above, we can fuse fp32 -> fp16/bf16 conversion and relu into 1 instruction
-template <typename To_type, typename Engine, typename Layout>
-__forceinline__ __device__ auto convert_type_relu(Tensor<Engine, Layout> const &tensor) {
-    using From_type = typename Engine::value_type;
-    static_assert(std::is_same_v<To_type, cutlass::half_t> || std::is_same_v<To_type, cutlass::bfloat16_t>);
-    static_assert(std::is_same_v<float, From_type>);
-    constexpr int numel = decltype(size(tensor))::value;
-    static_assert(numel % 2 == 0);
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-    // HACK: this requires tensor to be "contiguous"
-    Tensor tensor_float2 = recast<float2>(tensor);
-    Tensor out_uint32 = make_tensor<uint32_t>(tensor_float2.layout());
-    #pragma unroll
-    for (int i = 0; i < size(out_uint32); ++i) {
-        out_uint32(i) = convert_relu2<To_type>(tensor_float2(i));
-    }
-    Tensor out = make_tensor(make_rmem_ptr<To_type>(out_uint32.data()), tensor.layout());
-#else
-    Tensor out = flash::convert_type<To_type>(tensor);
-    flash::relu_(out);
-#endif
-    return out;
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Blocks until all but N previous cp.async.commit_group operations have committed.
 // This differs from cute::cp_async_wait in that when N = 0 we don't call cp.async.wait_all

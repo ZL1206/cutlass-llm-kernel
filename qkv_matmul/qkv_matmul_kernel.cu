@@ -15,13 +15,12 @@
 #include <cutlass/numeric_types.h>
 #include <cutlass/numeric_conversion.h>
 #include <cute/tensor.hpp>
-#include <cutlass/trace.h>
 
 
 using namespace cute;
 
 template <typename T_, int kTileM_ = 128, int kTileN_ = 32, int kTileK_ = 128, int kNWarps_ = 4>
-struct Kernel_traits {
+struct kernel_traits {
 
   using T = T_;
 
@@ -84,7 +83,7 @@ struct Kernel_traits {
                            Stride<Int<64>, _1>>;
   using SmemLayoutO = decltype(tile_to_shape(
         SmemLayoutAtomO{},
-        Shape<Int<kTileM>, Int<kTileN>>{}));
+        Shape<Int<kTileM>, Int<kTileK>>{}));
 
   // shared memory to register copy
   using SmemCopyAtom = Copy_Atom<SM75_U32x4_LDSM_N, T>;
@@ -107,6 +106,7 @@ struct Kernel_traits {
 struct fwd_params {
     void *__restrict__ q_ptr;
     void *__restrict__ k_ptr;
+    void *__restrict__ v_ptr;
     void * __restrict__ o_ptr;
     int seqlen_q;
     int seqlen_k;
@@ -117,16 +117,16 @@ struct fwd_params {
     int o_head_stride;
 };
 
-template <typename Kernel_traits, bool Is_even_MN, bool Is_causal>
+template <typename kernel_traits, bool Is_even_MN, bool Is_causal>
 __global__ void qk_matmul_kernel(fwd_params params) {
-    using T = typename Kernel_traits::T;
-    constexpr int M = Kernel_traits::kTileM;
-    constexpr int N = Kernel_traits::kTileN;
-    constexpr int K = Kernel_traits::kTileK;
+    using T = typename kernel_traits::T;
+    constexpr int M = kernel_traits::kTileM;
+    constexpr int N = kernel_traits::kTileN;
+    constexpr int K = kernel_traits::kTileK;
 
-    using GmemTiledCopyQKV = typename Kernel_traits::GmemTiledCopyQKV;
-    using SmemLayoutQ = typename Kernel_traits::SmemLayoutQ;
-    using SmemLayoutKV = typename Kernel_traits::SmemLayoutKV;
+    using GmemTiledCopyQKV = typename kernel_traits::GmemTiledCopyQKV;
+    using SmemLayoutQ = typename kernel_traits::SmemLayoutQ;
+    using SmemLayoutKV = typename kernel_traits::SmemLayoutKV;
 
     extern __shared__ char smem[];
 
@@ -142,6 +142,16 @@ __global__ void qk_matmul_kernel(fwd_params params) {
     
     Tensor sK = make_tensor(sQ.data() + size(sQ),
                             SmemLayoutKV{});
+
+    Tensor gV = make_tensor(make_gmem_ptr(reinterpret_cast<T*>(params.v_ptr)),
+                    make_shape(Int<N>{}, Int<K>{}),
+                    make_stride(Int<K>{}, Int<1>{}));
+
+    Tensor sV = make_tensor(sK.data() + size(sK), SmemLayoutKV{});
+    Tensor sVt = make_tensor(sV.data(), typename kernel_traits::SmemLayoutVtransposed{});
+    if (thread0()) {
+        print("sVt: "); print(sVt); printf("\n");
+    }
     
     const int idx = threadIdx.x;
 
@@ -151,6 +161,8 @@ __global__ void qk_matmul_kernel(fwd_params params) {
     Tensor tQsQ = gmem_thr_copy_QKV.partition_D(sQ);
     Tensor tKgK = gmem_thr_copy_QKV.partition_S(gK);  
     Tensor tKsK = gmem_thr_copy_QKV.partition_D(sK);
+    Tensor tVgV = gmem_thr_copy_QKV.partition_S(gV);  // (VCPY, VCPY_N, VCPY_K, nblocksN)
+    Tensor tVsV = gmem_thr_copy_QKV.partition_D(sV);
 
     Tensor cQ = make_identity_tensor(make_shape(size<0>(sQ), size<1>(sQ)));    // (BLK_M,BLK_K) -> (blk_m,blk_k)
     Tensor cKV = make_identity_tensor(make_shape(size<0>(sK), size<1>(sK)));    // (BLK_N,BLK_K) -> (blk_n,blk_k)
@@ -174,24 +186,29 @@ __global__ void qk_matmul_kernel(fwd_params params) {
         print("tKVcKV: "); print(tKVcKV); print("\n");
         print_tensor(tKVcKV);
     }
-    typename Kernel_traits::TiledMma tiled_mma;
+    typename kernel_traits::TiledMma tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(idx);
     Tensor tSrQ  = thr_mma.partition_fragment_A(sQ);                           // (MMA,MMA_M,MMA_K)
     Tensor tSrK  = thr_mma.partition_fragment_B(sK);                           // (MMA,MMA_N,MMA_K)
+    Tensor tOrVt  = thr_mma.partition_fragment_B(sVt);                // (MMA, MMA_K,MMA_N)
 
-    auto smem_tiled_copy_Q = make_tiled_copy_A(typename Kernel_traits::SmemCopyAtom{}, tiled_mma);
+    auto smem_tiled_copy_Q = make_tiled_copy_A(typename kernel_traits::SmemCopyAtom{}, tiled_mma);
     auto smem_thr_copy_Q = smem_tiled_copy_Q.get_thread_slice(idx);
     Tensor tSsQ = smem_thr_copy_Q.partition_S(sQ);
-    auto smem_tiled_copy_K = make_tiled_copy_B(typename Kernel_traits::SmemCopyAtom{}, tiled_mma);
+    auto smem_tiled_copy_K = make_tiled_copy_B(typename kernel_traits::SmemCopyAtom{}, tiled_mma);
     auto smem_thr_copy_K = smem_tiled_copy_K.get_thread_slice(idx);
     Tensor tSsK = smem_thr_copy_K.partition_S(sK);
+
+    auto smem_tiled_copy_V = make_tiled_copy_B(typename kernel_traits::SmemCopyAtomTransposed{}, tiled_mma);
+    auto smem_thr_copy_V = smem_tiled_copy_V.get_thread_slice(idx);
+    Tensor tOsVt = smem_thr_copy_V.partition_S(sVt);
 
     Tensor acc_s = partition_fragment_C(tiled_mma, Shape<Int<M>, Int<N>>{});  // (MMA=4, MMA_M, MMA_N)
     Tensor acc_o = partition_fragment_C(tiled_mma, Shape<Int<M>, Int<K>>{});  // MMA, MMA_M, MMA_K
     clear(acc_s);
     clear(acc_o);
     flash::Softmax<2 * size<1>(acc_s)> softmax;
-    flash::Mask<Is_causal> mask(params.seqlen_k, params.seqlen_q);
+    flash::Mask mask(params.seqlen_k, params.seqlen_q);
     
     // global to shared memory
     for (int m = 0; m < size<1>(tQgQ); m++) {
@@ -214,6 +231,14 @@ __global__ void qk_matmul_kernel(fwd_params params) {
         }
     }
 
+    for (int m = 0; m < size<1>(tVgV); m++) {
+        if (Is_even_MN || get<0>(tKVcKV(0, m, 0)) < params.seqlen_k) {
+            for (int k = 0; k < size<2>(tVgV); k++) {
+                copy(gmem_tiled_copy_QKV, tVgV(_, m, k), tVsV(_, m, k));
+            }
+        }
+    }
+
     cp_async_fence();
 
     cp_async_wait<0>();
@@ -226,9 +251,10 @@ __global__ void qk_matmul_kernel(fwd_params params) {
         print_tensor(tSsQ);
         print("tSsK: "); print(tSsK); print("\n");
         print_tensor(tSsK);
+        print("tOsVt: "); print(tOsVt); print("\n");
     }
     
-
+    // first gemm
     CUTE_STATIC_ASSERT_V(size<1>(tSrQ) == size<1>(acc_s));                     // MMA_M
     CUTE_STATIC_ASSERT_V(size<1>(tSrK) == size<2>(acc_s));                     // MMA_N
     CUTE_STATIC_ASSERT_V(size<2>(tSrQ) == size<2>(tSrK));                     // MMA_K
@@ -273,20 +299,60 @@ __global__ void qk_matmul_kernel(fwd_params params) {
     }
     mask.template apply_mask</*Causal_mask=*/false, Is_even_MN>(acc_s, 0, 0, 0, 0);
     
-    softmax.template softmax_rescale_o</*Is_first=*/true,  /*Check_inf=*/false>(acc_s, acc_o, params.scale_softmax_log2);
-    Tensor lse = softmax.template normalize_softmax_lse(acc_s, params.scale_softmax);
+    softmax.template softmax_rescale_o</*Check_inf=*/false>(acc_s, acc_o, params.scale_softmax_log2);
+    
     // Convert acc_s from fp32 to fp16/bf16
+    //Tensor rP = flash::convert_type<T>(acc_s);
     constexpr int numel = decltype(size(acc_s))::value;
     cutlass::NumericArrayConverter<T, float, numel> convert_op;
     auto frag = convert_op(*reinterpret_cast<const cutlass::Array<float, numel> *>(acc_s.data()));
-    Tensor rO = make_tensor(make_rmem_ptr<T>(&frag), acc_s.layout());
+    Tensor rP = make_tensor(make_rmem_ptr<T>(&frag), acc_s.layout());
+    if (thread0()) {
+        printf("rP: "); print(rP); print("\n");
+        print_tensor(rP);
+    }
+
+    // second gemm, change acc_s layout, output as input
+    Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<typename kernel_traits::TiledMma>(rP.layout()));
+    if (thread0()) {
+        print("tOrP is: "); print(tOrP); print("\n");
+    }
+    CUTE_STATIC_ASSERT_V(size<1>(tOrP) == size<1>(acc_o));                     // MMA_M
+    CUTE_STATIC_ASSERT_V(size<1>(tOrVt) == size<2>(acc_o));                     // MMA_N
+    CUTE_STATIC_ASSERT_V(size<2>(tOrP) == size<2>(tOrVt));                     // MMA_K
+    Tensor tCrV_copy_view = smem_thr_copy_V.retile_D(tOrVt);
+    CUTE_STATIC_ASSERT_V(size<1>(tOsVt) == size<1>(tCrV_copy_view));            // N
+    cute::copy(smem_tiled_copy_V, tOsVt(_, _, _0{}), tCrV_copy_view(_, _, _0{}));
 
     if (thread0()) {
-        printf("rO: "); print(rO); print("\n");
+        print("tOsVt: "); print(tOsVt); print("\n");
+        print_tensor(tOsVt);
+        print("tOrVt: "); print(tOrVt); print("\n");
+        print_tensor(tOrVt);
+    }
+
+    #pragma unroll
+    for (int i = 0; i < size<2>(tOrP); ++i) {
+        if (i < size<2>(tOrP) - 1) {
+            cute::copy(smem_tiled_copy_V, tOsVt(_, _, i + 1), tCrV_copy_view(_, _, i + 1));
+        }
+        cute::gemm(tiled_mma, tOrP(_, _, i), tOrVt(_, _, i), acc_o);
+    }
+
+    // Epilogue
+
+    Tensor lse = softmax.template normalize_softmax_lse(acc_o, params.scale_softmax);
+    // convert acc_o to fp16
+    constexpr int numel_ = decltype(size(acc_o))::value;
+    cutlass::NumericArrayConverter<T, float, numel_> convert_op_;
+    auto frag_ = convert_op_(*reinterpret_cast<const cutlass::Array<float, numel_> *>(acc_o.data()));
+    Tensor rO = make_tensor(make_rmem_ptr<T>(&frag_), acc_o.layout());
+    if (thread0()) {
+        print("rO: "); print(rO); print("\n");
         print_tensor(rO);
     }
-    Tensor sO = make_tensor(sQ.data(), typename Kernel_traits::SmemLayoutO{});    // (SMEM_M,SMEM_N)
-    auto smem_tiled_copy_O = make_tiled_copy_C(typename Kernel_traits::SmemCopyAtomO{}, tiled_mma);
+    Tensor sO = make_tensor(sQ.data(), typename kernel_traits::SmemLayoutO{});    // (SMEM_M,SMEM_N)
+    auto smem_tiled_copy_O = make_tiled_copy_C(typename kernel_traits::SmemCopyAtomO{}, tiled_mma);
     auto smem_thr_copy_O = smem_tiled_copy_O.get_thread_slice(idx);
     Tensor taccOrO = smem_thr_copy_O.retile_S(rO);        // ((Atom,AtomNum), MMA_M, MMA_N)
     Tensor taccOsO = smem_thr_copy_O.partition_D(sO);     // ((Atom,AtomNum),PIPE_M,PIPE_N)
@@ -320,13 +386,13 @@ __global__ void qk_matmul_kernel(fwd_params params) {
     }
     */
     Tensor gO = make_tensor(make_gmem_ptr(reinterpret_cast<T*>(params.o_ptr)),
-                    make_shape(Int<M>{}, Int<N>{}),
+                    make_shape(Int<M>{}, Int<K>{}),
                     make_stride(params.o_head_stride, Int<1>{}));
     if (thread0()) {
         print("gO: "); print(gO); print("\n");
     }
     
-    typename Kernel_traits::GmemTiledCopyO gmem_tiled_copy_O;
+    typename kernel_traits::GmemTiledCopyO gmem_tiled_copy_O;
     auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(idx);
     Tensor tOsO = gmem_thr_copy_O.partition_S(sO);        // ((Atom,AtomNum),ATOM_M,ATOM_N)
     Tensor tOgO = gmem_thr_copy_O.partition_D(gO);
@@ -358,7 +424,7 @@ __global__ void qk_matmul_kernel(fwd_params params) {
     for (int k = 0; k < size(tOpO); ++k) {
         int len = get<1>(tOcO(0, 0, k));
         printf("tid %d, len is %d\n", idx, len);
-        tOpO(k) = get<1>(tOcO(0, 0, k)) < params.seqlen_k;
+        tOpO(k) = get<1>(tOcO(0, 0, k)) < params.d;
     }
     // register to global memory
     for (int m = 0; m < size<1>(tOrO); m++) {
@@ -376,7 +442,7 @@ __global__ void qk_matmul_kernel(fwd_params params) {
 
 
 template <typename T>
-void qk_matmul_kernel_launch(const at::Tensor& query, const at::Tensor& key, at::Tensor& out, float softmax_scale, const bool is_causal) {
+void qk_matmul_kernel_launch(const at::Tensor& query, const at::Tensor& key, const at::Tensor& value, at::Tensor& out, float softmax_scale, const bool is_causal) {
     const int m = query.size(0);
     const int k = query.size(1);
     const int n = key.size(0);
@@ -385,6 +451,7 @@ void qk_matmul_kernel_launch(const at::Tensor& query, const at::Tensor& key, at:
     fwd_params params;
     params.q_ptr = query.data_ptr();
     params.k_ptr = key.data_ptr();
+    params.v_ptr = value.data_ptr();
     params.o_ptr = out.data_ptr();
     params.seqlen_q = m;
     params.seqlen_k = n;
@@ -392,10 +459,10 @@ void qk_matmul_kernel_launch(const at::Tensor& query, const at::Tensor& key, at:
     params.scale_softmax = softmax_scale;
     params.scale_softmax_log2 = softmax_scale * M_LOG2E;
     params.is_causal = is_causal;
-    params.o_head_stride = n;
+    params.o_head_stride = k;
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     const bool is_even_mn = params.seqlen_k % 64 == 0 && params.seqlen_q % 128 == 0;
-    Kernel_traits<T, 128, 64, 128> config;
+    kernel_traits<T, 128, 64, 128> config;
     BOOL_SWITCH(is_even_mn, Is_even_MN, [&] {
         BOOL_SWITCH(params.is_causal, Is_causal, [&] {
             auto kernel = &qk_matmul_kernel<decltype(config), Is_even_MN, Is_causal>;
@@ -410,9 +477,10 @@ void qk_matmul_kernel_launch(const at::Tensor& query, const at::Tensor& key, at:
 }
 
 
-void qk_matmul(
+void qkv_matmul(
     const at::Tensor& q,
     const at::Tensor& k,
+    const at::Tensor& v,
     at::Tensor& o,
     const float softmax_scale,
     const bool is_causal
@@ -425,7 +493,7 @@ void qk_matmul(
     TORCH_CHECK(k.stride(-1) == 1, "Input tensor must have contiguous last dimension");
      
     FP16_SWITCH(q_dtype != torch::kBFloat16, [&] {
-        qk_matmul_kernel_launch<elem_type>(q, k, o, softmax_scale, is_causal);
+        qk_matmul_kernel_launch<elem_type>(q, k, v, o, softmax_scale, is_causal);
     });
 
 }
