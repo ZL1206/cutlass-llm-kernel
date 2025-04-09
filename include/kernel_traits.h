@@ -14,6 +14,8 @@ template <typename T_, int kBlockM_ = 128, int kBlockN_ = 32, int kHeadDim_ = 12
 struct Kernel_traits {
 
   using T = T_;
+  using Tkv = T;
+  using Accum = float;
 
   // tile configuration
   static constexpr int kBlockM = kBlockM_;
@@ -39,6 +41,15 @@ struct Kernel_traits {
         make_tiled_copy(Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, T>{},
                         GmemLayoutAtom{},
                         Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per store
+  
+  using GmemLayoutAtomOaccum = Layout<Shape <_8, _16>,  // Thread layout, 16 threads per row
+               Stride< _16, _1>>;
+
+  using GmemTiledCopyOaccum = decltype(
+        make_tiled_copy(Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Accum>{},
+                        GmemLayoutAtomOaccum{},
+                        Layout<Shape < _1, _4>>{}));  // Val layout, 4 vals per store
+  
 
   // shared memory layout
   /*

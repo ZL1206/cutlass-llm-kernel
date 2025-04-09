@@ -187,6 +187,54 @@ struct Softmax {
         }
         return lse;
     };
+
+    
+    template<bool Split=false, typename Tensor0, typename Tensor1, typename Tensor2>
+    __forceinline__ __device__ TensorT normalize_final_lse(Tensor0 &lse, Tensor1 &smem_lse, Tensor2 &acc_o, const int idx) {
+        const int warp_idx = idx / 32;
+        const int lane = idx % 32;
+        #pragma unroll
+        for (int mi = 0; mi < size<0>(lse); ++mi) {
+            if (lane % 4 == 0) {
+                smem_lse(warp_idx, mi * 8 + lane / 4) = lse(mi);
+            }
+        }
+        __syncthreads();
+        TensorT lse_warp = make_fragment_like(row_sum);
+        #pragma unroll
+        for (int mi = 0; mi < size(lse_warp); mi++) {
+            lse_warp(mi) = smem_lse(lane % 4, mi * 8 + lane / 4);
+        }
+        
+        MaxOp<float> max_op;
+        TensorT lse_max = make_fragment_like(row_sum);
+        quad_allreduce_(lse_max, lse_warp, max_op);
+
+        TensorT lse_sum = make_fragment_like(row_sum);
+        for (int i = 0; i < size(lse_sum); i++) {
+            lse_sum(i) = expf(lse_warp(i) - lse_max(i));
+        }
+        SumOp<float> sum_op;
+        quad_allreduce_(lse_sum, lse_sum, sum_op);
+
+        TensorT lse_logsum = make_fragment_like(row_sum);
+        for (int i = 0; i < size(lse_logsum); i++) {
+            lse_logsum(i) = logf(lse_sum(i)) + lse_max(i);
+        }
+
+        // rescale acc_o
+        Tensor acc_o_rowcol = make_tensor(acc_o.data(), flash::convert_layout_acc_rowcol(acc_o.layout()));
+        for (int mi = 0; mi < size<0>(acc_o_rowcol); mi++) {
+            float scale = expf(lse(mi) - lse_logsum(mi));
+            for (int ni = 0; ni < size<1>(acc_o_rowcol); ni++) {
+                acc_o_rowcol(mi, ni) *= scale;
+            }
+        }
+
+        return lse_logsum;
+    };
+    
+
 };
 
 }  // namespace FLASH_NAMESPACE

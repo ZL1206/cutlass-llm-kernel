@@ -247,6 +247,7 @@ __global__ void qk_matmul_kernel(fwd_params params) {
 
     if (thread0()) {
         print("acc_s: "); print(acc_s); print("\n");
+        print("acc_o: "); print(acc_o); print("\n");
         print("tSsQ: "); print(tSsQ); print("\n");
         print_tensor(tSsQ);
         print("tSsK: "); print(tSsK); print("\n");
@@ -329,6 +330,8 @@ __global__ void qk_matmul_kernel(fwd_params params) {
         print_tensor(tOsVt);
         print("tOrVt: "); print(tOrVt); print("\n");
         print_tensor(tOrVt);
+        print("tCrV_copy_view: "); print(tCrV_copy_view); print("\n");
+        print_tensor(tCrV_copy_view);
     }
 
     #pragma unroll
@@ -342,6 +345,28 @@ __global__ void qk_matmul_kernel(fwd_params params) {
     // Epilogue
 
     Tensor lse = softmax.template normalize_softmax_lse(acc_o, params.scale_softmax);
+    if (thread0()) {
+        print("lse: "); print(lse); print("\n");
+        print_tensor(lse);
+    }
+    __syncthreads();
+    if (thread(1)) {
+        print("lse: "); print(lse); print("\n");
+        print_tensor(lse);
+    }
+    __syncthreads();
+    if (thread(2)) {
+        print("lse: "); print(lse); print("\n");
+        print_tensor(lse);
+    }
+    __syncthreads();
+    if (thread(3)) {
+        print("lse: "); print(lse); print("\n");
+        print_tensor(lse);
+    }
+    __syncthreads();
+
+
     // convert acc_o to fp16
     constexpr int numel_ = decltype(size(acc_o))::value;
     cutlass::NumericArrayConverter<T, float, numel_> convert_op_;

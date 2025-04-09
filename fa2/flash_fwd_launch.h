@@ -283,6 +283,61 @@ __global__ void flash_fwd_kernel(__grid_constant__ const kernel_params params) {
 }
 
 
+template<typename Kernel_traits, bool Is_causal, bool Is_even_MN, bool Is_even_K, bool Split>
+__global__ void flash_fwd_splitkv_kernel(__grid_constant__ const kernel_params params) {
+    const int m_block = blockIdx.x;
+    const int bidb = Split ? blockIdx.z / params.h : blockIdx.y;
+    const int bidh = Split ? blockIdx.z - bidb * params.h : blockIdx.z;
+    const int n_split_idx = Split ? blockIdx.y : 0;
+    const int num_n_splits = Split ? gridDim.y : 1;
+    
+    using T = typename Kernel_traits::T;
+    using Tkv = typename Kernel_traits::Tkv;
+    using Accum = typename Kernel_traits::Accum;
+    extern __shared__ char smem_[];
+
+    const int idx = threadIdx.x;
+
+    constexpr int kBlockM = Kernel_traits::kBlockM;
+    constexpr int kBlockN = Kernel_traits::kBlockN;
+    constexpr int kHeadDim = Kernel_traits::kHeadDim;
+    constexpr int kNWarps = Kernel_traits::kNWarps;
+
+    using GmemTiledCopyO = std::conditional_t<
+        !Split,
+        typename Kernel_traits::GmemTiledCopyO,
+        typename Kernel_traits::GmemTiledCopyOaccum
+    >;
+
+
+    const BlockInfo</*Varlen=*/!Is_even_MN> binfo(params, bidb);
+    // 提前退出
+    if (m_block * kBlockM >= binfo.actual_seqlen_q) return;
+    if (n_split_idx * params.chunk_size >= binfo.actual_seqlen_q) return;
+
+
+    const int n_block_min = 0;
+    const int seqlen_k = params.chunk_size;
+    const int n_block_max = cute::ceil_div(seqlen_k, kBlockN);
+
+    const int block_table_idx = block_table == nullptr ? 0 : (n_block_max - 1) * kBlockN / params.page_block_size;
+
+    const index_t row_offset_k = block_table[block_table_idx] * params.k_batch_stride + block_table_offset * params.k_row_stride + (bidh / params.h_h_k_ratio) * params.k_head_stride;
+
+    const int* block_table = params.block_table + bidb * params.block_table_batch_stride;
+
+    Tensor mQ = make_tensor(make_gmem_ptr(reinterpret_cast<T*>(params.q_ptr) + binfo.q_offset(params.q_batch_stride, params.q_row_stride, bidb)),
+                            make_shape(binfo.actual_seqlen_q, params.h, params,d),
+                            make_stride(params.q_row_stride, params.q_head_stride, _1{}));
+    Tensor gQ = local_tile(mQ(_, bidb, _), Shape<Int<kBlockM>, Int<kHeadDim>>{}, make_coord(m_block, 0));
+
+    Tensor gK = make_tensor(make_gmem_ptr(reinterpret_cast<Tkv*>(params.k_ptr) + row_offset_k), );
+
+
+
+
+}
+
 
 
 

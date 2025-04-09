@@ -71,11 +71,11 @@ class NinjaBuildExtension(BuildExtension):
         super().__init__(*args, **kwargs)
 
 setup(
-    name="int4_qk_matmul",
+    name="int4_qkv_matmul",
     ext_modules=[
         CUDAExtension(
-            name="int4_qk_matmul_ops",
-            sources=["int4_qk_matmul.cpp", "int4_qk_matmul_kernel.cu"],
+            name="int4_qkv_matmul_ops",
+            sources=["int4_qkv_matmul.cpp", "int4_qkv_matmul_kernel.cu"],
             include_dirs=[
                 Path(parent_dir) / "3rd" / "cutlass" / "include",
                 Path(parent_dir) / "include",

@@ -1,9 +1,9 @@
 import torch
-import small_qk_matmul_ops
+import small_q_qkv_matmul_ops
 
 torch.manual_seed(42)
 
-seqlen_q = 16
+seqlen_q = 32
 seqlen_k = 64
 head_size = 128
 query = torch.randn((seqlen_q, head_size), dtype=torch.float16, device="cuda")
@@ -12,7 +12,7 @@ value = torch.randn((seqlen_k, head_size), dtype=torch.float16, device="cuda")
 out = torch.empty((seqlen_q, head_size), dtype=torch.float16, device="cuda")
 
 softmax_scale = head_size ** (-0.5) 
-small_qk_matmul_ops.small_qk_matmul(query, key, value, out, softmax_scale, False)
+small_q_qkv_matmul_ops.small_q_qkv_matmul(query, key, value, out, softmax_scale, False)
 """
 groups = out.chunk(4, dim=0)
 result = torch.zeros_like(groups[0])  # 初始化 [16, 128] 的全零张量
