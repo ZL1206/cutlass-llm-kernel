@@ -39,15 +39,15 @@ out = torch.empty((seqlen_q, head_size), dtype=torch.float16, device="cuda")
 torch.cuda.synchronize()
 
 softmax_scale = head_size ** (-0.5) 
-int4_qkv_matmul_ops.int4_qkv_matmul(query, key, value, key_scale, value_scale, out, softmax_scale, False)
+out, fa_lse = int4_qkv_matmul_ops.int4_qkv_matmul(query, key, value, key_scale, value_scale, out, softmax_scale, False)
 
 # torch
 q, k, v = query.float(), ref_key.float(), ref_value.float()
+k = k * key_scale[0, :].unsqueeze(1) + key_scale[1, :].unsqueeze(1)
+v = v * value_scale[0, :].unsqueeze(1) + value_scale[1, :].unsqueeze(1)
 out_ref = torch.matmul(q, k.t())
 out_ref = out_ref * softmax_scale
-lse = torch.logsumexp(out_ref, dim=1)
-print("lse: ")
-print(lse)
+torch_lse = torch.logsumexp(out_ref, dim=1)
 out_ref = torch.softmax(out_ref, dim=-1)
 out_ref = torch.matmul(out_ref, v)
 
@@ -62,3 +62,8 @@ print(out_ref.size())
 
 print("mean diff: ", (out_ref - out).abs().mean())
 print("max diff ", (out_ref - out).abs().max())
+
+
+print("lse: ")
+print(fa_lse)
+print(torch_lse)

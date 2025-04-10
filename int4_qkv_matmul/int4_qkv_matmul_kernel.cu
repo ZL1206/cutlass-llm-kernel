@@ -143,6 +143,7 @@ struct Kernel_traits {
     alignas(128) cute::ArrayEngine<T, cute::cosize_v<SmemLayoutKV>> smem_k;
     alignas(128) cute::ArrayEngine<T, cute::cosize_v<SmemLayoutKVParams>> smem_k_params;
     alignas(128) cute::ArrayEngine<T, cute::cosize_v<SmemLayoutKV>> smem_v;
+    alignas(128) cute::ArrayEngine<T, cute::cosize_v<SmemLayoutKVParams>> smem_v_params;
     alignas(128) cute::ArrayEngine<T, cute::cosize_v<SmemLayoutQ>> smem_q;
     alignas(128) cute::ArrayEngine<T, cute::cosize_v<SmemLayoutO>> smem_o;
     alignas(128) cute::ArrayEngine<float, cute::cosize_v<SmemLayoutLse>> smem_lse;
@@ -217,6 +218,13 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
     
     Tensor sV = make_tensor(make_smem_ptr(shared_storage.smem_v.begin()), SmemLayoutKV{});
     Tensor sVt = make_tensor(sV.data(), typename Kernel_traits::SmemLayoutVtransposed{});
+
+    Tensor gVP = make_tensor(make_gmem_ptr(reinterpret_cast<T*>(params.v_scale_ptr)),
+                             make_shape(Int<2>{}, Int<64>{}),
+                             make_stride(Int<64>{}, Int<1>{}));
+
+    Tensor sVP = make_tensor(make_smem_ptr(shared_storage.smem_v_params.begin()),
+                            typename Kernel_traits::SmemLayoutKVParams{});
     
     
     const int idx = threadIdx.x;
@@ -238,6 +246,8 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
 
     Tensor tVgV = gmem_thr_copy_KV.partition_S(gV);  
     Tensor tVsV = gmem_thr_copy_KV.partition_D(sV);
+    Tensor tVPgVP = gmem_thr_copy_KV.partition_S(gVP);  
+    Tensor tVPsVP = gmem_thr_copy_KV.partition_D(sVP);
 
     // first mma
     typename Kernel_traits::TiledMma tiled_mma;
@@ -316,6 +326,14 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
     } 
 
 
+    for (int m = 0; m < size<1>(tVPgVP); m++) {
+        if (get<0>(tKVPcKVp(0, m, 0)) < 2) {
+            for (int k = 0; k < size<2>(tVPgVP); k++) {
+                copy(gmem_tiled_copy_KV, tVPgVP(_, m, k), tVPsVP(_, m, k));
+            }
+        }
+    } 
+
     cp_async_fence();
 
     cp_async_wait<0>();
@@ -350,15 +368,16 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
         print_tensor(sKP);
     }
     Tensor scale_k = make_tensor<T>(Shape<_2, Int<size<1>(tSrK)>>{},
-                                    Stride<Int<size<1>(tSrK)>, _1>{});
+                                    Stride<_1, Int<size<1>(tSrK)>>{});
     
-    for (int ni = 0; ni < size<1>(tSrK); ni++) {
-        const int col = warp_idx * size<1>(tSrK) * 8 + lane / 4; 
-        scale_k(0, ni) = sKP(0, col);
-        scale_k(1, ni) = sKP(0, col + 8);
+    const int col = warp_idx * size<1>(tSrK) * 8 + lane / 4;
+    for (int ni = 0; ni < size<1>(tSrK); ni++) { 
+        scale_k(0, ni) = sKP(0, col + ni * 8);
+        scale_k(1, ni) = sKP(1, col + ni * 8);
     }
     if (thread0()) {
-        
+        print("scale_k: \n");
+        print_tensor(scale_k); 
     }
     for (int ki = 0; ki < size<2>(tSrK_q); ki++) {
         cute::copy(smem_tiled_copy_K, tSsK(_, _, ki), tCrB_copy_view(_, _, ki));
@@ -367,6 +386,9 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
                 Tensor src = tSrK_q(make_coord(_, r), ni, ki);
                 Tensor dst = tSrK_dq(_, ni, make_coord(r, ki));
                 flash::ConvertKvCache<Tkv, T>::convert(src, dst);
+                for (int i = 0; i < 8; i++) {
+                    dst(i) = dst(i) * scale_k(0, ni) + scale_k(1, ni);
+                }
             }
         }
 
@@ -434,6 +456,31 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
         print("tCrV_copy_view: "); print(tCrV_copy_view); print("\n");
     }
     
+    Tensor scale_v = make_tensor<T>(Shape<_2, Shape<_2, _2>, Int<size<2>(tOrVt)>>{},
+                                    Stride<_1, Stride<_2, _4>, _8>{});
+
+    if (thread0()) {
+        print("sVP: \n");
+        print_tensor(sVP);
+    }
+    
+    
+    for (int ki = 0; ki < size<2>(tOrVt); ki++) {
+        const int col = warp_idx * size<2>(tOrVt) * 16 + ki * 16 + (lane % 4) * 2;
+        for (int r = 0; r < 2; r++) {
+            for (int e = 0; e < 2; e++) {
+                scale_v(0, make_coord(e, r), ki) = sVP(0, col + r * 8 + e);
+                scale_v(1, make_coord(e, r), ki) = sVP(1, col + r * 8 + e);
+            }
+        }
+    }
+
+    if (thread0()) {
+        print("scale_v: \n");
+        print_tensor(scale_v);
+    }
+    
+    /*
     for (int ni = 0; ni < size<2>(tOrVt_q); ni++) {
         cute::copy(smem_tiled_copy_V, tOsVt(_, _, ni), tCrV_copy_view(_, _, ni));
         for (int ki = 0; ki < size<1>(tOrVt_q); ki++) {
@@ -441,6 +488,26 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
                 Tensor src = tOrVt_q(make_coord(_, r), ki, ni);
                 Tensor dst = tOrVt_dq(make_coord(_, r), ki, ni);
                 flash::ConvertKvCache<Tkv, T>::convert(src, dst);
+            }
+        }
+    }
+    */
+
+    for (int ki = 0; ki < size<2>(tOrVt_q); ki++) {
+        cute::copy(smem_tiled_copy_V, tOsVt(_, _, ki), tCrV_copy_view(_, _, ki));
+        for (int ni = 0; ni < size<1>(tOrVt_q); ni++) {
+            for (int r = 0; r < 2; r++) {
+                Tensor src = tOrVt_q(make_coord(_, r), ni, ki);
+                Tensor dst = tOrVt_dq(make_coord(_, r), ni, ki);
+                flash::ConvertKvCache<Tkv, T>::convert(src, dst);
+                dst(0) = dst(0) * scale_v(0, make_coord(0, r), ki) + scale_v(1, make_coord(0, r), ki);
+                dst(1) = dst(1) * scale_v(0, make_coord(1, r), ki) + scale_v(1, make_coord(1, r), ki);
+                dst(2) = dst(2) * scale_v(0, make_coord(0, r), ki) + scale_v(1, make_coord(0, r), ki);
+                dst(3) = dst(3) * scale_v(0, make_coord(1, r), ki) + scale_v(1, make_coord(1, r), ki);
+                dst(4) = dst(4) * scale_v(0, make_coord(0, r), ki) + scale_v(1, make_coord(0, r), ki);
+                dst(5) = dst(5) * scale_v(0, make_coord(1, r), ki) + scale_v(1, make_coord(1, r), ki);
+                dst(6) = dst(6) * scale_v(0, make_coord(0, r), ki) + scale_v(1, make_coord(0, r), ki);
+                dst(7) = dst(7) * scale_v(0, make_coord(1, r), ki) + scale_v(1, make_coord(1, r), ki);
             }
         }
     }
@@ -477,8 +544,6 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
 
 
     // copy acc_o to shared memory
-    const int warp_idx = idx / 32;
-    const int lane = idx % 32;
     Tensor mO = make_tensor(sQ.data(), typename Kernel_traits::SmemLayoutO{});    // (SMEM_M,SMEM_N)
     Tensor sO = local_tile(mO(_, _), Shape<Int<M>, Int<K>>{},
                         make_coord(warp_idx, 0));  // (kBlockM, kHeadDim)
@@ -503,13 +568,13 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
                     make_shape(Int<M>{}, Int<K>{}),
                     make_stride(params.o_head_stride, Int<1>{}));
     
-    /*
+    
     const int batch = 0;
     const int head = 0;
     const int64_t row_offset_lseaccum = 0 * M;
-    Tensor gLSEaccum = make_tensor(make_gmem_ptr(reinterpret_cast<float*>(params.softmax_lse_ptr) + row_offset_lseaccum),
+    Tensor gLSE = make_tensor(make_gmem_ptr(reinterpret_cast<float*>(params.softmax_lse_ptr) + row_offset_lseaccum),
                                    Shape<Int<M>>{}, Stride<_1>{});
-    */
+    
     // warp reduction
     typename Kernel_traits::GmemTiledCopyO gmem_tiled_copy_O;
     auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(idx);
@@ -548,18 +613,37 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
     Tensor taccOcO = thr_mma_pv.partition_C(caccO);
     static_assert(decltype(size<0>(taccOcO))::value == 4);
     Tensor taccOcO_row = logical_divide(taccOcO, Shape<_2>{})(make_coord(0, _), _, 0);
-    if (thread0()) {
-        print("caccO: "); print(caccO); print("\n");
-        print("taccOcO: "); print(taccOcO); print("\n");
-        print("taccOcO_row: "); print(taccOcO_row); print("\n");
+
+    __syncthreads();
+    if (thread(32)) {
+        print("caccO: "); print("\n");
+        print_tensor(caccO);
+        print("taccOcO: "); print("\n");
+        print_tensor(taccOcO);
+        print("taccOcO_row: "); print("\n");
+        print_tensor(taccOcO_row);
     }
+    
+    CUTE_STATIC_ASSERT_V(size(final_lse) == size(taccOcO_row));
+    if (warp_idx == 0 && get<1>(taccOcO_row(0)) == 0) {
+        #pragma unroll
+        for (int mi = 0; mi < size(final_lse); ++mi) {
+            const int row = get<0>(taccOcO_row(mi));
+            if (thread(32)) {
+                printf("tid %d, row %d\n", idx, row);
+            }
+            if (row < params.seqlen_q) { gLSE(row) = final_lse(mi); }
+        }
+    }
+
+    __syncthreads();
+
 
     Tensor cO = make_identity_tensor(make_shape(size<0>(sO), size<1>(sO)));    // (BLK_M,BLK_K) -> (blk_m,blk_k)
     // Repeat the partitioning with identity layouts
     Tensor tOcO = gmem_thr_copy_O.partition_D(cO);                           // (ACPY,ACPY_M,ACPY_K) -> (blk_m,blk_k)
     Tensor tOpO = make_tensor<bool>(make_shape(size<2>(tOgO)));
-    CUTE_STATIC_ASSERT_V(size(final_lse) == size(taccOcO_row));                     // MMA_M
-
+    
     #pragma unroll
     for (int k = 0; k < size(tOpO); ++k) {
         int len = get<1>(tOcO(0, 0, k));
@@ -592,59 +676,15 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
 
 
 
-template <typename T>
-void int4_qkv_matmul_kernel_launch(const at::Tensor& query, const at::Tensor& key, const at::Tensor& value, const at::Tensor& key_scale, const at::Tensor& value_scale, at::Tensor& out, float softmax_scale, const bool is_causal) {
-    const int m = query.size(0);
-    const int k = query.size(1);
-    const int n = key.size(0);
-    printf("m %d, n %d, k %d\n", m, n, k);
-    TORCH_CHECK(k == 128, "only support k == 128");
-    const int batch_size = 1;
-    const int num_heads = 1;
-    const int seqlen_q = m;
-    auto opts = query.options();
-    auto softmax_lse = torch::empty({1, 1, seqlen_q}, opts.dtype(at::kFloat));
-    fwd_params params;
-    params.q_ptr = query.data_ptr();
-    params.k_ptr = key.data_ptr();
-    params.v_ptr = value.data_ptr();
-    params.k_scale_ptr = key_scale.data_ptr();
-    params.v_scale_ptr = value_scale.data_ptr();
-    params.o_ptr = out.data_ptr();
-    params.softmax_lse_ptr = softmax_lse.data_ptr();
-    params.seqlen_q = m;
-    params.seqlen_k = n;
-    params.d = k;
-    params.scale_softmax = softmax_scale;
-    params.scale_softmax_log2 = softmax_scale * M_LOG2E;
-    params.is_causal = is_causal;
-    params.o_head_stride = k;
-    auto stream = at::cuda::getCurrentCUDAStream().stream();
-    const bool is_even_mn = params.seqlen_k % 64 == 0 && params.seqlen_q % 16 == 0;
-    Kernel_traits<T, cutlass::uint4b_t, 16, 64, 128> config;
-    BOOL_SWITCH(is_even_mn, Is_even_MN, [&] {
-        BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-            auto kernel = &int4_qkv_matmul_kernel<decltype(config), Is_even_MN, Is_causal>;
-            const int smem_size = config.kSmemSize;
-            printf("smem_size is %d\n", smem_size);
-            if (smem_size >= 48 * 1024) {
-                cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
-            }
-            kernel<<<1, config.kNThreads, smem_size, stream>>>(params);
-        });
-    });
-}
-
-
-void int4_qkv_matmul(
-    const at::Tensor& q,
-    const at::Tensor& k,
-    const at::Tensor& v,
-    const at::Tensor& k_scale,
-    const at::Tensor& v_scale,
-    at::Tensor& o,
-    const float softmax_scale,
-    const bool is_causal
+std::vector<at::Tensor>
+int4_qkv_matmul(const at::Tensor& q,
+                const at::Tensor& k,
+                const at::Tensor& v,
+                const at::Tensor& k_scale,
+                const at::Tensor& v_scale,
+                at::Tensor& o,
+                const float softmax_scale,
+                const bool is_causal
 ) {
     at::cuda::CUDAGuard device_guard{q.device()};
     auto q_dtype = q.dtype();
@@ -652,9 +692,51 @@ void int4_qkv_matmul(
     //TORCH_CHECK(k.dtype() == q_dtype, "query and key must have the same dtype");
     TORCH_CHECK(q.stride(-1) == 1, "Input tensor must have contiguous last dimension");
     TORCH_CHECK(k.stride(-1) == 1, "Input tensor must have contiguous last dimension");
-     
+    TORCH_CHECK(v.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+
+
+    const int seqlen_q = q.size(0);
+    const int head_size = q.size(1);
+    const int seqlen_k = k.size(0);
+    TORCH_CHECK(head_size == 128, "only support head_size == 128");
+    const int batch_size = 1;
+    const int num_heads = 1;
+    auto opts = q.options();
+    auto softmax_lse = torch::empty({1, 1, seqlen_q}, opts.dtype(at::kFloat));
+    fwd_params params;
+    params.q_ptr = q.data_ptr();
+    params.k_ptr = k.data_ptr();
+    params.v_ptr = v.data_ptr();
+    params.k_scale_ptr = k_scale.data_ptr();
+    params.v_scale_ptr = v_scale.data_ptr();
+    params.o_ptr = o.data_ptr();
+    params.softmax_lse_ptr = softmax_lse.data_ptr();
+    params.seqlen_q = seqlen_q;
+    params.seqlen_k = seqlen_k;
+    params.d = head_size;
+    params.scale_softmax = softmax_scale;
+    params.scale_softmax_log2 = softmax_scale * M_LOG2E;
+    params.is_causal = is_causal;
+    params.o_head_stride = head_size;
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    const bool is_even_mn = params.seqlen_k % 64 == 0 && params.seqlen_q % 16 == 0;
+    
     FP16_SWITCH(q_dtype != torch::kBFloat16, [&] {
-        int4_qkv_matmul_kernel_launch<elem_type>(q, k, v, k_scale, v_scale, o, softmax_scale, is_causal);
+        BOOL_SWITCH(is_even_mn, Is_even_MN, [&] {
+            BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+                Kernel_traits<elem_type, cutlass::uint4b_t, 16, 64, 128> config;
+                auto kernel = &int4_qkv_matmul_kernel<decltype(config), Is_even_MN, Is_causal>;
+                const int smem_size = config.kSmemSize;
+                printf("smem_size is %d\n", smem_size);
+                if (smem_size >= 48 * 1024) {
+                    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+                }
+                kernel<<<1, config.kNThreads, smem_size, stream>>>(params);
+            });
+        });
+
     });
+     
+    return {o, softmax_lse};
 
 }
