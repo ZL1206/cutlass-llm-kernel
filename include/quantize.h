@@ -233,6 +233,18 @@ struct ConvertKvCache<
   }
 };
 
+template<typename Tensor0, typename Tensor1>
+__forceinline__ __device__ void load_k_params(Tensor0 &k_params, Tensor1 const& sKP) {
+  const int warp_idx = threadIdx.x / 32;
+  const int lane = threadIdx.x % 32;
+  const int col = warp_idx * size<1>(k_params) * 8 + lane / 4;
+  #pragma unroll
+  for (int ni = 0; ni < size<1>(k_params); ni++) { 
+    k_params(0, ni) = sKP(0, col + ni * 8);
+    k_params(1, ni) = sKP(1, col + ni * 8);
+  }  
+}
+
 
 
 }

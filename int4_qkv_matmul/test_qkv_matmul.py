@@ -45,11 +45,11 @@ out, fa_lse = int4_qkv_matmul_ops.int4_qkv_matmul(query, key, value, key_scale, 
 q, k, v = query.float(), ref_key.float(), ref_value.float()
 k = k * key_scale[0, :].unsqueeze(1) + key_scale[1, :].unsqueeze(1)
 v = v * value_scale[0, :].unsqueeze(1) + value_scale[1, :].unsqueeze(1)
-out_ref = torch.matmul(q, k.t())
-out_ref = out_ref * softmax_scale
-torch_lse = torch.logsumexp(out_ref, dim=1)
-out_ref = torch.softmax(out_ref, dim=-1)
-out_ref = torch.matmul(out_ref, v)
+scores = torch.matmul(q, k.t())
+scores = scores * softmax_scale
+torch_lse = torch.logsumexp(scores, dim=1)
+attention = torch.softmax(scores, dim=-1)
+out_ref = torch.matmul(attention, v)
 
 torch.cuda.synchronize()
 

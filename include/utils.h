@@ -19,6 +19,8 @@
 #include <cutlass/numeric_conversion.h>
 #include <cutlass/numeric_types.h>
 
+#include "quantize.h"
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 namespace flash {
@@ -91,6 +93,57 @@ __forceinline__ __device__ void gemm(Tensor0 &acc, Tensor1 &tCrA, Tensor2 &tCrB,
         if (i < size<2>(tCrA) - 1) {
             if (!A_in_regs) { cute::copy(smem_tiled_copy_A, tCsA(_, _, i + 1), tCrA_copy_view(_, _, i + 1)); }
             if (!B_in_regs) { cute::copy(smem_tiled_copy_B, tCsB(_, _, i + 1), tCrB_copy_view(_, _, i + 1)); }
+        }
+        cute::gemm(tiled_mma, tCrA(_, _, i), tCrB(_, _, i), acc);
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+template<typename T, typename Tkv, typename Tensor0, typename Tensor1,
+         typename Tensor2, typename Tensor3, typename Tensor4, typename Tensor5, typename Tensor6, typename Tensor7, typename Tensor8,
+         typename TiledMma, typename TiledCopyA, typename TiledCopyB,
+         typename ThrCopyA, typename ThrCopyB>
+__forceinline__ __device__ void gemm(Tensor0 &acc, Tensor1 &tCrA, Tensor2 &tCrB_q, Tensor3 &tCrB, Tensor4 &tCrB_dq, Tensor5 const& tCsA,
+                            Tensor6 const& tCsB, Tensor7 const& sKP, Tensor8 &k_params, TiledMma tiled_mma,
+                            TiledCopyA smem_tiled_copy_A, TiledCopyB smem_tiled_copy_B,
+                            ThrCopyA smem_thr_copy_A, ThrCopyB smem_thr_copy_B) {
+    CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(acc));                     // MMA_M
+    CUTE_STATIC_ASSERT_V(size<1>(tCrB) == size<2>(acc));                     // MMA_N
+    CUTE_STATIC_ASSERT_V(size<2>(tCrA) == size<2>(tCrB));                     // MMA_K
+    Tensor tCrA_copy_view = smem_thr_copy_A.retile_D(tCrA);
+    CUTE_STATIC_ASSERT_V(size<1>(tCsA) == size<1>(tCrA_copy_view));            // M
+
+    // dequantize
+    flash::load_k_params(k_params, sKP);
+
+    Tensor tCrB_copy_view = smem_thr_copy_B.retile_D(tCrB_q);
+    CUTE_STATIC_ASSERT_V(size<1>(tCsB) == size<1>(tCrB_copy_view));            // N
+    cute::copy(smem_tiled_copy_B, tCsB(_, _, _0{}), tCrB_copy_view(_, _, _0{}));
+    #pragma unroll
+    for (int ki = 0; ki < size<2>(tCrB_q); ki++) {
+      if (ki < size<2>(tCrB_q) - 1) {
+        cute::copy(smem_tiled_copy_B, tCsB(_, _, ki + 1), tCrB_copy_view(_, _, ki + 1));
+      }
+      #pragma unroll
+      for (int ni = 0; ni < size<1>(tCrB_q); ni++) {
+        for (int r = 0; r < 2; r++) {
+          Tensor src = tCrB_q(make_coord(_, r), ni, ki);
+          Tensor dst = tCrB_dq(_, ni, make_coord(r, ki));
+          flash::ConvertKvCache<Tkv, T>::convert(src, dst);
+          for (int i = 0; i < 8; i++) {
+            dst(i) = dst(i) * k_params(0, ni) + k_params(1, ni);
+          }
+        }
+      }
+    }
+
+    // mma
+    cute::copy(smem_tiled_copy_A, tCsA(_, _, _0{}), tCrA_copy_view(_, _, _0{}));
+    #pragma unroll
+    for (int i = 0; i < size<2>(tCrA); ++i) {
+        if (i < size<2>(tCrA) - 1) {
+            cute::copy(smem_tiled_copy_A, tCsA(_, _, i + 1), tCrA_copy_view(_, _, i + 1));
         }
         cute::gemm(tiled_mma, tCrA(_, _, i), tCrB(_, _, i), acc);
     }

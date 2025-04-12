@@ -173,7 +173,7 @@ struct fwd_params {
 
 
 
-template <typename Kernel_traits, bool Is_even_MN, bool Is_causal>
+template <typename Kernel_traits, bool Is_even_MN, bool Is_even_K, bool Is_causal>
 __global__ void int4_qkv_matmul_kernel(fwd_params params) {
     using T = typename Kernel_traits::T;
     using Tkv = typename Kernel_traits::Tkv;
@@ -249,6 +249,20 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
     Tensor tVPgVP = gmem_thr_copy_KV.partition_S(gVP);  
     Tensor tVPsVP = gmem_thr_copy_KV.partition_D(sVP);
 
+    Tensor cQ = make_identity_tensor(make_shape(size<0>(sQ), size<1>(sQ)));    // (BLK_M,BLK_K) -> (blk_m,blk_k)
+    Tensor cKV = make_identity_tensor(make_shape(size<0>(sK), size<1>(sK)));    // (BLK_N,BLK_K) -> (blk_n,blk_k)
+    Tensor tQcQ = gmem_thr_copy_Q.partition_S(cQ);       // (ACPY,ACPY_M,ACPY_K) -> (blk_m,blk_k)
+    Tensor tKVcKV = gmem_thr_copy_KV.partition_S(cKV);   // (BCPY,BCPY_N,BCPY_K) -> (blk_n,blk_k)
+    Tensor tQpQ = make_tensor<bool>(make_shape(size<2>(tQsQ)));
+    Tensor tKVpKV = make_tensor<bool>(make_shape(size<2>(tKsK)));
+
+    if (thread0()) {
+        print("cKV: \n");
+        print_tensor(cKV);
+        print("tKVcKV: \n");
+        print_tensor(tKVcKV);
+    }
+
     // first mma
     typename Kernel_traits::TiledMma tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(idx);
@@ -257,6 +271,9 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
     Tensor tSrK = make_tensor<T>(Shape< Shape<_2, _2>, _2, _8>{},              // (MMA,MMA_N,MMA_K)
                                  Stride< Stride<_1, _2>, _32, _4>{});
     Tensor tSrK_dq = make_tensor(tSrK.data(), Layout<Shape<_8, _2, Shape<_2, _2>>, Stride<_1, _32, Stride<_8, _16>>>{});
+
+    Tensor k_params = make_tensor<T>(Shape<_2, _2>{},
+                                    Stride<_1, _2>{});
     
     // second mma
     typename Kernel_traits::TiledMma_PV tiled_mma_pv;
@@ -290,13 +307,18 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
 
  
     // global to shared memory
+    /*
     for (int m = 0; m < size<1>(tQgQ); m++) {
-        
+        if (Is_even_MN || get<0>(tQcQ(0, m, 0)) < params.seqlen_q) {
             for (int k = 0; k < size<2>(tQgQ); k++) {
                 copy(gmem_tiled_copy_Q, tQgQ(_, m, k), tQsQ(_, m, k));
             }
-        
+        }
     }
+    */
+
+    flash::copy<Is_even_MN, Is_even_K>(gmem_tiled_copy_Q, tQgQ, tQsQ, tQcQ, tQpQ,
+                                       params.seqlen_q);
     
 
     for (int m = 0; m < size<1>(tKgK); m++) {
@@ -354,73 +376,7 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
     }
 
     
-
-    CUTE_STATIC_ASSERT_V(size<1>(tSrQ) == size<1>(acc_s));                     // MMA_M
-    CUTE_STATIC_ASSERT_V(size<1>(tSrK) == size<2>(acc_s));                     // MMA_N
-    CUTE_STATIC_ASSERT_V(size<2>(tSrQ) == size<2>(tSrK));
-    Tensor tCrA_copy_view = smem_thr_copy_Q.retile_D(tSrQ);
-    CUTE_STATIC_ASSERT_V(size<1>(tSsQ) == size<1>(tCrA_copy_view));            // M
-    Tensor tCrB_copy_view = smem_thr_copy_K.retile_D(tSrK_q);
-    cute::copy(smem_tiled_copy_Q, tSsQ(_, _, _0{}), tCrA_copy_view(_, _, _0{})); // copy q
-    
-    if (thread0()) {
-        print("sKP: \n");
-        print_tensor(sKP);
-    }
-    Tensor scale_k = make_tensor<T>(Shape<_2, Int<size<1>(tSrK)>>{},
-                                    Stride<_1, Int<size<1>(tSrK)>>{});
-    
-    const int col = warp_idx * size<1>(tSrK) * 8 + lane / 4;
-    for (int ni = 0; ni < size<1>(tSrK); ni++) { 
-        scale_k(0, ni) = sKP(0, col + ni * 8);
-        scale_k(1, ni) = sKP(1, col + ni * 8);
-    }
-    if (thread0()) {
-        print("scale_k: \n");
-        print_tensor(scale_k); 
-    }
-    for (int ki = 0; ki < size<2>(tSrK_q); ki++) {
-        cute::copy(smem_tiled_copy_K, tSsK(_, _, ki), tCrB_copy_view(_, _, ki));
-        for (int ni = 0; ni < size<1>(tSrK_q); ni++) {
-            for (int r = 0; r < 2; r++) {
-                Tensor src = tSrK_q(make_coord(_, r), ni, ki);
-                Tensor dst = tSrK_dq(_, ni, make_coord(r, ki));
-                flash::ConvertKvCache<Tkv, T>::convert(src, dst);
-                for (int i = 0; i < 8; i++) {
-                    dst(i) = dst(i) * scale_k(0, ni) + scale_k(1, ni);
-                }
-            }
-        }
-
-    }
-    /*
-    for (int n = 0; n < size<1>(tSrK_q); n++) {
-        for (int r = 0; r < 2; r++) {
-            Tensor src = tSrK_q(make_coord(_, r), n, 0);
-            Tensor dst = tSrK_dq(_, n, r);
-            flash::ConvertKvCache<Tkv, T>::convert(src, dst);
-        }
-    }
-    */
-    if (thread0()) {
-        print("tSsK: "); print(tSsK); print("\n");
-        print_tensor(tSsK);
-        print("tCrB_copy_view: "); print(tCrB_copy_view); print("\n");
-        print("tSrK_q: "); print(tSrK_q); print("\n");
-        print_tensor(tSrK_q);
-        print("tSrK: "); print(tSrK); print("\n");
-        print_tensor(tSrK);
-    }
-
-    
-    #pragma unroll
-    for (int i = 0; i < size<2>(tSrQ); ++i) {
-        if (i < size<2>(tSrQ) - 1) {
-            cute::copy(smem_tiled_copy_Q, tSsQ(_, _, i + 1), tCrA_copy_view(_, _, i + 1));
-        }
-
-        cute::gemm(tiled_mma, tSrQ(_, _, i), tSrK(_, _, i), acc_s);        
-    }
+    flash::gemm<T, Tkv>(acc_s, tSrQ, tSrK_q, tSrK, tSrK_dq, tSsQ, tSsK, sKP, k_params, tiled_mma, smem_tiled_copy_Q, smem_tiled_copy_K, smem_thr_copy_Q, smem_thr_copy_K);
 
     __syncthreads();
 
@@ -646,7 +602,6 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
     
     #pragma unroll
     for (int k = 0; k < size(tOpO); ++k) {
-        int len = get<1>(tOcO(0, 0, k));
         //printf("tid %d, len is %d\n", idx, len);
         tOpO(k) = get<1>(tOcO(0, 0, k)) < params.d;
     }
@@ -659,19 +614,9 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
         printf("tOpO: "); print(tOpO); print("\n");
         print_tensor(tOpO);
     }
-    // register to global memory
-    for (int m = 0; m < size<1>(tOrO_accum); m++) {
-            for (int k = 0; k < size<2>(tOrO_accum); k++) {
-                if (tOpO(k)) {
-                    cute::copy(gmem_tiled_copy_O, tOrO_accum(_, m, k), tOgO(_, m, k));
-                }
-            }
-        
-    }
 
-
-    
-    
+    flash::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
+        gmem_tiled_copy_O, tOrO_accum, tOgO, tOcO, tOpO, params.seqlen_q);    
 }
 
 
@@ -720,18 +665,20 @@ int4_qkv_matmul(const at::Tensor& q,
     params.o_head_stride = head_size;
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     const bool is_even_mn = params.seqlen_k % 64 == 0 && params.seqlen_q % 16 == 0;
-    
+    const bool is_even_k = params.d == 128;
     FP16_SWITCH(q_dtype != torch::kBFloat16, [&] {
         BOOL_SWITCH(is_even_mn, Is_even_MN, [&] {
-            BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-                Kernel_traits<elem_type, cutlass::uint4b_t, 16, 64, 128> config;
-                auto kernel = &int4_qkv_matmul_kernel<decltype(config), Is_even_MN, Is_causal>;
-                const int smem_size = config.kSmemSize;
-                printf("smem_size is %d\n", smem_size);
-                if (smem_size >= 48 * 1024) {
-                    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
-                }
-                kernel<<<1, config.kNThreads, smem_size, stream>>>(params);
+            BOOL_SWITCH(is_even_k, Is_even_K, [&] {
+                BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+                    Kernel_traits<elem_type, cutlass::uint4b_t, 16, 64, 128> config;
+                    auto kernel = &int4_qkv_matmul_kernel<decltype(config), Is_even_MN, Is_even_K, Is_causal>;
+                    const int smem_size = config.kSmemSize;
+                    printf("smem_size is %d\n", smem_size);
+                    if (smem_size >= 48 * 1024) {
+                        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+                    }
+                    kernel<<<1, config.kNThreads, smem_size, stream>>>(params);
+                });
             });
         });
 
