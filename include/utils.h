@@ -105,7 +105,7 @@ template<typename T, typename Tkv, typename Tensor0, typename Tensor1,
          typename TiledMma, typename TiledCopyA, typename TiledCopyB,
          typename ThrCopyA, typename ThrCopyB>
 __forceinline__ __device__ void gemm(Tensor0 &acc, Tensor1 &tCrA, Tensor2 &tCrB_q, Tensor3 &tCrB, Tensor4 &tCrB_dq, Tensor5 const& tCsA,
-                            Tensor6 const& tCsB, Tensor7 const& sKP, Tensor8 &k_params, TiledMma tiled_mma,
+                            Tensor6 const& tCsB, Tensor7 &k_params, Tensor8 const& sKP, TiledMma tiled_mma,
                             TiledCopyA smem_tiled_copy_A, TiledCopyB smem_tiled_copy_B,
                             ThrCopyA smem_thr_copy_A, ThrCopyB smem_thr_copy_B) {
     CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(acc));                     // MMA_M
@@ -145,6 +145,50 @@ __forceinline__ __device__ void gemm(Tensor0 &acc, Tensor1 &tCrA, Tensor2 &tCrB_
         if (i < size<2>(tCrA) - 1) {
             cute::copy(smem_tiled_copy_A, tCsA(_, _, i + 1), tCrA_copy_view(_, _, i + 1));
         }
+        cute::gemm(tiled_mma, tCrA(_, _, i), tCrB(_, _, i), acc);
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+template<typename T, typename Tkv, typename Tensor0, typename Tensor1, typename Tensor2, typename Tensor3, typename Tensor4, typename Tensor5, typename Tensor6, typename Tensor7, 
+         typename TiledMma, typename TiledCopy, typename ThrCopy>
+__forceinline__ __device__ void gemm_rs(Tensor0 &acc, Tensor1 &tCrA, Tensor2 &tCrB_q, Tensor3 &tCrB, Tensor4 &tCrB_dq, Tensor5 const& tCsB,
+                               Tensor6 &v_params, Tensor7 const& sVP, TiledMma tiled_mma, TiledCopy smem_tiled_copy_B,
+                               ThrCopy smem_thr_copy_B) {
+    CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(acc));                     // MMA_M
+    CUTE_STATIC_ASSERT_V(size<1>(tCrB) == size<2>(acc));                     // MMA_N
+    CUTE_STATIC_ASSERT_V(size<2>(tCrA) == size<2>(tCrB));                     // MMA_K
+    Tensor tCrB_copy_view = smem_thr_copy_B.retile_D(tCrB_q);
+    CUTE_STATIC_ASSERT_V(size<1>(tCsB) == size<1>(tCrB_copy_view));            // N
+    // dequantize
+    flash::load_v_params(v_params, sVP);
+
+    cute::copy(smem_tiled_copy_B, tCsB(_, _, _0{}), tCrB_copy_view(_, _, _0{}));
+
+    for (int ki = 0; ki < size<2>(tCrB_q); ki++) {
+        if (ki < size<2>(tCrB_q) - 1) {
+            cute::copy(smem_tiled_copy_B, tCsB(_, _, ki), tCrB_copy_view(_, _, ki));
+        }
+        for (int ni = 0; ni < size<1>(tCrB_q); ni++) {
+            for (int r = 0; r < 2; r++) {
+                Tensor src = tCrB_q(make_coord(_, r), ni, ki);
+                Tensor dst = tCrB_dq(make_coord(_, r), ni, ki);
+                flash::ConvertKvCache<Tkv, T>::convert(src, dst);
+                dst(0) = dst(0) * v_params(0, make_coord(0, r), ki) + v_params(1, make_coord(0, r), ki);
+                dst(1) = dst(1) * v_params(0, make_coord(1, r), ki) + v_params(1, make_coord(1, r), ki);
+                dst(2) = dst(2) * v_params(0, make_coord(0, r), ki) + v_params(1, make_coord(0, r), ki);
+                dst(3) = dst(3) * v_params(0, make_coord(1, r), ki) + v_params(1, make_coord(1, r), ki);
+                dst(4) = dst(4) * v_params(0, make_coord(0, r), ki) + v_params(1, make_coord(0, r), ki);
+                dst(5) = dst(5) * v_params(0, make_coord(1, r), ki) + v_params(1, make_coord(1, r), ki);
+                dst(6) = dst(6) * v_params(0, make_coord(0, r), ki) + v_params(1, make_coord(0, r), ki);
+                dst(7) = dst(7) * v_params(0, make_coord(1, r), ki) + v_params(1, make_coord(1, r), ki);
+            }
+        }
+
+    }
+    #pragma unroll
+    for (int i = 0; i < size<2>(tCrA); ++i) {
         cute::gemm(tiled_mma, tCrA(_, _, i), tCrB(_, _, i), acc);
     }
 }

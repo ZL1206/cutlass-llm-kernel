@@ -246,6 +246,24 @@ __forceinline__ __device__ void load_k_params(Tensor0 &k_params, Tensor1 const& 
 }
 
 
+template<typename Tensor0, typename Tensor1>
+__forceinline__ __device__ void load_v_params(Tensor0 &v_params, Tensor1 const& sVP) {
+  const int warp_idx = threadIdx.x / 32;
+  const int lane = threadIdx.x % 32;
+  #pragma unroll
+  for (int ki = 0; ki < size<2>(v_params); ki++) {
+    const int col = warp_idx * size<2>(v_params) * 16 + ki * 16 + (lane % 4) * 2;
+    for (int r = 0; r < 2; r++) {
+      for (int e = 0; e < 2; e++) {
+        v_params(0, make_coord(e, r), ki) = sVP(0, col + r * 8 + e);
+        v_params(1, make_coord(e, r), ki) = sVP(1, col + r * 8 + e);
+      }
+    }
+  }  
+}
+
+
+
 
 }
 

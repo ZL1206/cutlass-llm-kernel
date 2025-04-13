@@ -282,6 +282,9 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
     Tensor tOrVt = make_tensor<T>(Shape< Shape<_2, _2>, _16, _1>{}, 
                                   Stride< Stride<_1, _32>, _2, _0>{});
     Tensor tOrVt_dq = make_tensor(tOrVt.data(), Layout<Shape<Shape<_8, _2>, _4, _1>, Stride<Stride<_1, _32>, _8, _0>>{});
+
+    Tensor v_params = make_tensor<T>(Shape<_2, Shape<_2, _2>, _1>{},
+                                    Stride<_1, Stride<_2, _4>, _8>{});
     
     auto smem_tiled_copy_Q = make_tiled_copy_A(typename Kernel_traits::SmemCopyAtom{}, tiled_mma);
     auto smem_thr_copy_Q = smem_tiled_copy_Q.get_thread_slice(idx);
@@ -376,7 +379,7 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
     }
 
     
-    flash::gemm<T, Tkv>(acc_s, tSrQ, tSrK_q, tSrK, tSrK_dq, tSsQ, tSsK, sKP, k_params, tiled_mma, smem_tiled_copy_Q, smem_tiled_copy_K, smem_thr_copy_Q, smem_thr_copy_K);
+    flash::gemm<T, Tkv>(acc_s, tSrQ, tSrK_q, tSrK, tSrK_dq, tSsQ, tSsK, k_params, sKP, tiled_mma, smem_tiled_copy_Q, smem_tiled_copy_K, smem_thr_copy_Q, smem_thr_copy_K);
 
     __syncthreads();
 
@@ -401,88 +404,9 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
     // second gemm, change acc_s layout, output as input
     Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<typename Kernel_traits::TiledMma>(rP.layout()));
 
-    CUTE_STATIC_ASSERT_V(size<1>(tOrP) == size<1>(acc_o));                     // MMA_M
-    CUTE_STATIC_ASSERT_V(size<1>(tOrVt) == size<2>(acc_o));                     // MMA_N
-    CUTE_STATIC_ASSERT_V(size<2>(tOrP) == size<2>(tOrVt));                     // MMA_K
 
-    Tensor tCrV_copy_view = smem_thr_copy_V.retile_D(tOrVt_q);
-    CUTE_STATIC_ASSERT_V(size<1>(tOsVt) == size<1>(tCrV_copy_view));            // N
-    if (thread0()) {
-        print("tOrVt_q: "); print(tOrVt_q); print("\n");
-        print("tCrV_copy_view: "); print(tCrV_copy_view); print("\n");
-    }
+    flash::gemm_rs<T, Tkv>(acc_o, tOrP, tOrVt_q, tOrVt, tOrVt_dq, tOsVt, v_params, sVP, tiled_mma_pv, smem_tiled_copy_V, smem_thr_copy_V);
     
-    Tensor scale_v = make_tensor<T>(Shape<_2, Shape<_2, _2>, Int<size<2>(tOrVt)>>{},
-                                    Stride<_1, Stride<_2, _4>, _8>{});
-
-    if (thread0()) {
-        print("sVP: \n");
-        print_tensor(sVP);
-    }
-    
-    
-    for (int ki = 0; ki < size<2>(tOrVt); ki++) {
-        const int col = warp_idx * size<2>(tOrVt) * 16 + ki * 16 + (lane % 4) * 2;
-        for (int r = 0; r < 2; r++) {
-            for (int e = 0; e < 2; e++) {
-                scale_v(0, make_coord(e, r), ki) = sVP(0, col + r * 8 + e);
-                scale_v(1, make_coord(e, r), ki) = sVP(1, col + r * 8 + e);
-            }
-        }
-    }
-
-    if (thread0()) {
-        print("scale_v: \n");
-        print_tensor(scale_v);
-    }
-    
-    /*
-    for (int ni = 0; ni < size<2>(tOrVt_q); ni++) {
-        cute::copy(smem_tiled_copy_V, tOsVt(_, _, ni), tCrV_copy_view(_, _, ni));
-        for (int ki = 0; ki < size<1>(tOrVt_q); ki++) {
-            for (int r = 0; r < 2; r++) {
-                Tensor src = tOrVt_q(make_coord(_, r), ki, ni);
-                Tensor dst = tOrVt_dq(make_coord(_, r), ki, ni);
-                flash::ConvertKvCache<Tkv, T>::convert(src, dst);
-            }
-        }
-    }
-    */
-
-    for (int ki = 0; ki < size<2>(tOrVt_q); ki++) {
-        cute::copy(smem_tiled_copy_V, tOsVt(_, _, ki), tCrV_copy_view(_, _, ki));
-        for (int ni = 0; ni < size<1>(tOrVt_q); ni++) {
-            for (int r = 0; r < 2; r++) {
-                Tensor src = tOrVt_q(make_coord(_, r), ni, ki);
-                Tensor dst = tOrVt_dq(make_coord(_, r), ni, ki);
-                flash::ConvertKvCache<Tkv, T>::convert(src, dst);
-                dst(0) = dst(0) * scale_v(0, make_coord(0, r), ki) + scale_v(1, make_coord(0, r), ki);
-                dst(1) = dst(1) * scale_v(0, make_coord(1, r), ki) + scale_v(1, make_coord(1, r), ki);
-                dst(2) = dst(2) * scale_v(0, make_coord(0, r), ki) + scale_v(1, make_coord(0, r), ki);
-                dst(3) = dst(3) * scale_v(0, make_coord(1, r), ki) + scale_v(1, make_coord(1, r), ki);
-                dst(4) = dst(4) * scale_v(0, make_coord(0, r), ki) + scale_v(1, make_coord(0, r), ki);
-                dst(5) = dst(5) * scale_v(0, make_coord(1, r), ki) + scale_v(1, make_coord(1, r), ki);
-                dst(6) = dst(6) * scale_v(0, make_coord(0, r), ki) + scale_v(1, make_coord(0, r), ki);
-                dst(7) = dst(7) * scale_v(0, make_coord(1, r), ki) + scale_v(1, make_coord(1, r), ki);
-            }
-        }
-    }
-
-    if (thread0()) {
-        print("tOsVt: "); print(tOsVt); print("\n");
-        print_tensor(tOsVt);
-        print("tCrV_copy_view: "); print(tCrV_copy_view); print("\n");
-        print("tOrVt_q: "); print(tOrVt_q); print("\n");
-        print_tensor(tOrVt_q);
-        print("tOrVt: "); print(tOrVt); print("\n");
-        print_tensor(tOrVt);
-    }
-
-    #pragma unroll
-    for (int i = 0; i < size<2>(tOrP); ++i) {
-        cute::gemm(tiled_mma, tOrP(_, _, i), tOrVt(_, _, i), acc_o);
-    }
-
 
     // Epilogue
     
