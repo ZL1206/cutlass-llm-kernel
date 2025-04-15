@@ -241,13 +241,13 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
     auto gmem_thr_copy_KV = gmem_tiled_copy_KV.get_slice(idx);
     Tensor tKgK = gmem_thr_copy_KV.partition_S(gK);  
     Tensor tKsK = gmem_thr_copy_KV.partition_D(sK);
-    Tensor tKPgKP = gmem_thr_copy_KV.partition_S(gKP);  
-    Tensor tKPsKP = gmem_thr_copy_KV.partition_D(sKP);
+    Tensor tKPgKP = gmem_thr_copy_Q.partition_S(gKP);  
+    Tensor tKPsKP = gmem_thr_copy_Q.partition_D(sKP);
 
     Tensor tVgV = gmem_thr_copy_KV.partition_S(gV);  
     Tensor tVsV = gmem_thr_copy_KV.partition_D(sV);
-    Tensor tVPgVP = gmem_thr_copy_KV.partition_S(gVP);  
-    Tensor tVPsVP = gmem_thr_copy_KV.partition_D(sVP);
+    Tensor tVPgVP = gmem_thr_copy_Q.partition_S(gVP);  
+    Tensor tVPsVP = gmem_thr_copy_Q.partition_D(sVP);
 
     Tensor cQ = make_identity_tensor(make_shape(size<0>(sQ), size<1>(sQ)));    // (BLK_M,BLK_K) -> (blk_m,blk_k)
     Tensor cKV = make_identity_tensor(make_shape(size<0>(sK), size<1>(sK)));    // (BLK_N,BLK_K) -> (blk_n,blk_k)
@@ -255,6 +255,10 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
     Tensor tKVcKV = gmem_thr_copy_KV.partition_S(cKV);   // (BCPY,BCPY_N,BCPY_K) -> (blk_n,blk_k)
     Tensor tQpQ = make_tensor<bool>(make_shape(size<2>(tQsQ)));
     Tensor tKVpKV = make_tensor<bool>(make_shape(size<2>(tKsK)));
+
+    Tensor cKVP = make_identity_tensor(make_shape(size<0>(sKP), size<1>(sKP)));    // (BLK_M,BLK_K) -> (blk_m,blk_k)
+    Tensor tKVPcKVp = gmem_thr_copy_Q.partition_S(cKVP);       // (ACPY,ACPY_M,ACPY_K) -> (blk_m,blk_k)
+     
 
     if (thread0()) {
         print("cKV: \n");
@@ -324,40 +328,25 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
                                        params.seqlen_q);
     
 
-    for (int m = 0; m < size<1>(tKgK); m++) {
-            for (int k = 0; k < size<2>(tKgK); k++) {
-                copy(gmem_tiled_copy_KV, tKgK(_, m, k), tKsK(_, m, k));
-            }
+    flash::copy<Is_even_MN, Is_even_K>(gmem_tiled_copy_KV, tKgK, tKsK, tKVcKV, tKVpKV,
+                                       params.seqlen_k);
 
+
+    flash::copy<Is_even_MN, Is_even_K>(gmem_tiled_copy_KV, tVgV, tVsV, tKVcKV, tKVpKV,
+                                       params.seqlen_k);
+        
+    if (thread0()) {
+        print("tKPgKP: "); print(tKPgKP); print("\n");
+        print("cKVP: \n");
+        print_tensor(cKVP);
+        print("tKVPcKVp: \n");
+        print_tensor(tKVPcKVp);
     }
 
 
-    for (int m = 0; m < size<1>(tVgV); m++) {
-            for (int k = 0; k < size<2>(tVgV); k++) {
-                copy(gmem_tiled_copy_KV, tVgV(_, m, k), tVsV(_, m, k));
-            }
+    flash::copy</*Is_even_MN=*/false>(gmem_tiled_copy_Q, tKPgKP, tKPsKP, tKVPcKVp, 2);
+    flash::copy</*Is_even_MN=*/false>(gmem_tiled_copy_Q, tVPgVP, tVPsVP, tKVPcKVp, 2);
 
-    }
-
-    Tensor cKVP = make_identity_tensor(make_shape(size<0>(sKP), size<1>(sKP)));    // (BLK_M,BLK_K) -> (blk_m,blk_k)
-    Tensor tKVPcKVp = gmem_thr_copy_KV.partition_S(cKVP);       // (ACPY,ACPY_M,ACPY_K) -> (blk_m,blk_k)
-    
-    for (int m = 0; m < size<1>(tKPgKP); m++) {
-        if (get<0>(tKVPcKVp(0, m, 0)) < 2) {
-            for (int k = 0; k < size<2>(tKPgKP); k++) {
-                copy(gmem_tiled_copy_KV, tKPgKP(_, m, k), tKPsKP(_, m, k));
-            }
-        }
-    } 
-
-
-    for (int m = 0; m < size<1>(tVPgVP); m++) {
-        if (get<0>(tKVPcKVp(0, m, 0)) < 2) {
-            for (int k = 0; k < size<2>(tVPgVP); k++) {
-                copy(gmem_tiled_copy_KV, tVPgVP(_, m, k), tVPsVP(_, m, k));
-            }
-        }
-    } 
 
     cp_async_fence();
 
@@ -396,11 +385,7 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
     softmax.template softmax_rescale_o</*Check_inf=*/false>(acc_s, acc_o, params.scale_softmax_log2);
 
 
-    constexpr int numel = decltype(size(acc_s))::value;
-    cutlass::NumericArrayConverter<T, float, numel> convert_op;
-    auto frag = convert_op(*reinterpret_cast<const cutlass::Array<float, numel> *>(acc_s.data()));
-    Tensor rP = make_tensor(make_rmem_ptr<T>(&frag), acc_s.layout());
-
+    Tensor rP = flash::convert_type<T>(acc_s);
     // second gemm, change acc_s layout, output as input
     Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<typename Kernel_traits::TiledMma>(rP.layout()));
 
@@ -417,11 +402,7 @@ __global__ void int4_qkv_matmul_kernel(fwd_params params) {
     Tensor final_lse = softmax.template normalize_final_lse(lse, smem_lse, acc_o, idx);
 
     // convert acc_o to fp16
-    constexpr int numel_ = decltype(size(acc_o))::value;
-    cutlass::NumericArrayConverter<T, float, numel_> convert_op_;
-    auto frag_ = convert_op_(*reinterpret_cast<const cutlass::Array<float, numel_> *>(acc_o.data()));
-    Tensor rO = make_tensor(make_rmem_ptr<T>(&frag_), acc_o.layout());
-
+    Tensor rO = flash::convert_type<T>(acc_o);
 
     // copy acc_o to shared memory
     Tensor mO = make_tensor(sQ.data(), typename Kernel_traits::SmemLayoutO{});    // (SMEM_M,SMEM_N)
