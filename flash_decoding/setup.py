@@ -73,15 +73,15 @@ class NinjaBuildExtension(BuildExtension):
         super().__init__(*args, **kwargs)
 
 setup(
-    name="mini_flash_attn",
+    name="int4_attention",
     ext_modules=[
         CUDAExtension(
-            name="mini_flash_attn_ops",
-            sources=["mini_flash_api.cpp", 
-                     "flash_fwd_128_fp16.cu",
-                     "flash_fwd_128_bf16.cu",
-                     "flash_fwd_128_fp16_causal.cu",
-                     "flash_fwd_128_bf16_causal.cu"],
+            name="int4_attention_ops",
+            sources=["flash_api.cpp", 
+                     "flash_fwd_split_128_fp16.cu",
+                     "flash_fwd_split_128_bf16.cu",
+                     "flash_fwd_split_128_fp16_causal.cu",
+                     "flash_fwd_split_128_bf16_causal.cu"],
             include_dirs=[
                 Path(parent_dir) / "3rd" / "cutlass" / "include",
                 Path(parent_dir) / "include",

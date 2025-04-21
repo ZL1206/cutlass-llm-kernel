@@ -4,7 +4,7 @@
 #include "flash.h"
 #include "static_switch.h"
 #include <cutlass/numeric_types.h>
-
+#include "hardware_info.h"
 
 namespace flash {
 
@@ -27,6 +27,8 @@ void set_params_fprop(kernel_params& params,
                       const at::Tensor& q,
                       const at::Tensor& k,
                       const at::Tensor& v,
+                      const at::Tensor& k_params,
+                      const at::Tensor& v_params,
                       at::Tensor& out,
                       void* cu_seqlens_q_d,
                       void* seqlens_k_d,
@@ -40,20 +42,43 @@ void set_params_fprop(kernel_params& params,
     params.q_ptr = q.data_ptr();
     params.k_ptr = k.data_ptr();
     params.v_ptr = v.data_ptr();
+    params.k_params_ptr = k_params.data_ptr();
+    params.v_params_ptr = v_params.data_ptr();
     params.o_ptr = out.data_ptr();
 
     params.q_row_stride = q.stride(-3);
-    params.k_row_stride = k.stride(-2);
-    params.v_row_stride = v.stride(-2);
     params.q_head_stride = q.stride(-2);
+    
+
+    params.k_block_stride = k.stride(0);
     params.k_head_stride = k.stride(-3);
+    params.k_row_stride = k.stride(-2);
+    params.k_params_block_stride = k_params.stride(0);
+    params.k_params_head_stride = k_params.stride(-3);
+
+    params.v_block_stride = v.stride(0);
     params.v_head_stride = v.stride(-3);
+    params.v_row_stride = v.stride(-2);
+    params.v_params_block_stride = v_params.stride(0);
+    params.v_params_head_stride = v_params.stride(-3);
+    
     params.o_row_stride = out.stride(-3);
     params.o_head_stride = out.stride(-2);
+
+    if (cu_seqlens_q_d == nullptr) {
+        params.q_batch_stride = q.stride(0);
+        params.o_batch_stride = out.stride(0);
+        if (seqlenq_ngroups_swapped) {
+            params.q_batch_stride *= seqlen_q;
+            params.o_batch_stride *= seqlen_q;
+        }
+    }
 
     params.cu_seqlens_q = static_cast<int *>(cu_seqlens_q_d);
     params.seqlens_k = static_cast<int *>(seqlens_k_d);
 
+    params.scale_softmax = softmax_scale;
+    params.scale_softmax_log2 = softmax_scale * M_LOG2E;
     params.softmax_lse_ptr = softmax_lse_d;
 
     params.b = b;
@@ -70,9 +95,10 @@ void set_params_fprop(kernel_params& params,
 }
 
 
-void mha_fwd_kvcache(
+std::vector<at::Tensor>
+mha_varlen_fwd(
     at::Tensor& q,
-    const at::Tensor& k_cache,
+    const at::Tensor& k_cache, // [num_block, num_head, page_size, head_size]
     const at::Tensor& v_cache,
     const at::Tensor& k_params,
     const at::Tensor& v_params,
@@ -80,7 +106,7 @@ void mha_fwd_kvcache(
     const at::Tensor& seqlens_k,
     const at::Tensor& block_table,
     at::Tensor& out,
-    const int max_seqlen_q,
+    int max_seqlen_q,
     const int max_seqlen_k,
     const float softmax_scale,
     bool is_causal
@@ -104,12 +130,12 @@ void mha_fwd_kvcache(
     const auto sizes = q.sizes();
     int num_heads = sizes[1];
     const int head_size = sizes[2];
-    const int num_heads_k = k_cache.size(2);
+    const int num_heads_k = k_cache.size(1);
     TORCH_CHECK(num_heads % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
 
     const int batch_size = cu_seqlens_q.numel() - 1;
     const int max_num_blocks_per_seq = block_table.size(1);
-    const int page_size = kcache.size(1);
+    const int page_size = k_cache.size(2);
 
     if (max_seqlen_q == 1) {
         is_causal = false;
@@ -117,6 +143,7 @@ void mha_fwd_kvcache(
 
     void *cu_seqlens_q_d = cu_seqlens_q.data_ptr();
     const int seqlenq_ngroups_swapped = max_seqlen_q == 1 && num_heads > num_heads_k;
+    printf("max_seqlen_q is %d, num_heads is %d, num_heads_k is %d, page_size is %d, seqlenq_ngroups_swapped is %d\n", max_seqlen_q, num_heads, num_heads_k, page_size, seqlenq_ngroups_swapped);
     const int ngroups = num_heads / num_heads_k;
     if (seqlenq_ngroups_swapped) {
         q = q.reshape({batch_size, num_heads_k, ngroups, head_size}).transpose(1, 2).reshape({batch_size * ngroups, num_heads_k, head_size});
@@ -134,10 +161,17 @@ void mha_fwd_kvcache(
     kernel_params params;
     set_params_fprop(params,
                      batch_size,
-                     max_seqlen_q, max_seqlen_k,
-                     num_heads, num_heads_k,
+                     max_seqlen_q, 
+                     max_seqlen_k,
+                     num_heads,
+                     num_heads_k,
                      head_size,
-                     q, k, v, out,
+                     q,
+                     k_cache,
+                     v_cache,
+                     k_params,
+                     v_params,
+                     out,
                      cu_seqlens_q_d,
                      seqlens_k.data_ptr(),
                      softmax_lse.data_ptr(),
@@ -148,8 +182,6 @@ void mha_fwd_kvcache(
     params.is_causal = is_causal;
     params.block_table = block_table.data_ptr<int>();
     params.block_table_batch_stride = block_table.stride(0);
-    params.k_block_stride = k.stride(0);
-    params.v_block_stride = v.stride(0);
     params.page_size = page_size;
     
     if (max_seqlen_k > 0) {
@@ -176,5 +208,5 @@ void mha_fwd_kvcache(
 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("mini_fwd", &flash::mini_mha_fwd, "mini flash attention");
+    m.def("varlen_fwd", &flash::mha_varlen_fwd, "mini flash attention");
 }

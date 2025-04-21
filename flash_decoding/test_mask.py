@@ -28,9 +28,10 @@ seqlen = [
         (256, 512),
         (1023, 1024),
         (256, 129),
+        (128, 257),
     ]
 
-kblockm = 128
+kblockm = 16
 kblockn = 64
 for i in range(len(seqlen)):
     seqlen_q = seqlen[i][0]

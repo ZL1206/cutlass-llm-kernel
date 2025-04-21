@@ -4,17 +4,18 @@ from rearrange_kv import rerange_k, rerange_v, pack_uint4_to_uint8
 
 torch.manual_seed(42)
 
+dtype = torch.float16
 seqlen_q = 16
 seqlen_k = 64
 head_size = 128
-query = torch.randn((seqlen_q, head_size), dtype=torch.float16, device="cuda")
+query = torch.randn((seqlen_q, head_size), dtype=dtype, device="cuda")
 
 key = torch.randint(0, 16, (seqlen_k, head_size), dtype=torch.uint8, device="cuda")
 value = torch.randint(0, 16, (seqlen_k, head_size), dtype=torch.uint8, device="cuda")
-key_scale = torch.randn((2, 64), dtype=torch.float16, device="cuda")
-value_scale = torch.randn((2, 64), dtype=torch.float16, device="cuda")
-ref_key = key.to(torch.float16)
-ref_value = value.to(torch.float16)
+key_scale = torch.randn((2, 64), dtype=dtype, device="cuda")
+value_scale = torch.randn((2, 64), dtype=dtype, device="cuda")
+ref_key = key.to(dtype)
+ref_value = value.to(dtype)
 
 torch.set_printoptions(threshold=64*128, linewidth=1000)
 
@@ -34,7 +35,7 @@ value = pack_uint4_to_uint8(value)
 
 torch.set_printoptions(profile="default")
 
-out = torch.empty((seqlen_q, head_size), dtype=torch.float16, device="cuda")
+out = torch.empty((seqlen_q, head_size), dtype=dtype, device="cuda")
 
 torch.cuda.synchronize()
 

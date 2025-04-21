@@ -9,16 +9,17 @@
 
 using namespace cute;
 
-template <typename T_, typename Tkv_, int kTileM_ = 128, int kTileN_ = 32, int kTileK_ = 128, int kNWarps_ = 4>
+template <typename T_, typename Tkv_, int kBlockM_ = 128, int kBlockN_ = 32, int kHeadDim_ = 128, int kNWarps_ = 4>
 struct Kernel_traits {
 
   using T = T_;
   using Tkv = Tkv_;
 
   // tile configuration
-  static constexpr int kTileM = kTileM_;
-  static constexpr int kTileN = kTileN_;
-  static constexpr int kTileK = kTileK_;
+  static constexpr int kBlockM = kBlockM_;
+  static constexpr int kBlockN = kBlockN_;
+  static constexpr int kHeadDim = kHeadDim_;
+  static constexpr int kHeadDim_kv = kHeadDim / 4;
 
   static constexpr int kNWarps = kNWarps_;
   static constexpr int kNThreads = kNWarps * 32;
@@ -61,7 +62,7 @@ struct Kernel_traits {
 
   using SmemLayoutQ = decltype(tile_to_shape(
         SmemLayoutAtomQ{},
-        Shape<Int<kTileM>, Int<kTileK>>{}));
+        Shape<Int<kBlockM>, Int<kHeadDim>>{}));
   
   // smem layout kv
   using SmemLayoutAtomKV = Layout<Shape<_8, Int<32>>,
@@ -69,10 +70,10 @@ struct Kernel_traits {
   
   using SmemLayoutKV = decltype(tile_to_shape(
         SmemLayoutAtomKV{},
-        Shape<Int<kTileN>, Int<32>>{}));
+        Shape<Int<kBlockN>, Int<32>>{}));
     
-  using SmemLayoutKVParams = Layout<Shape<_2, Int<kTileN>>,
-                                   Stride<Int<kTileN>, _1>>; 
+  using SmemLayoutKVParams = Layout<Shape<_2, Int<kBlockN>>,
+                                   Stride<Int<kBlockN>, _1>>; 
 
   using SmemCopyAtom = Copy_Atom<SM75_U32x4_LDSM_N, T>;
 
@@ -80,21 +81,27 @@ struct Kernel_traits {
                            Stride<Int<64>, _1>>;
   using SmemLayoutO = decltype(tile_to_shape(
         SmemLayoutAtomO{},
-        Shape<Int<kTileM * kNWarps>, Int<kTileK>>{}));
+        Shape<Int<kBlockM * kNWarps>, Int<kHeadDim>>{}));
   
   using SmemCopyAtomO = Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, T>;
   
   using SmemLayoutVtransposed = decltype(
-        composition(SmemLayoutKV{}, make_layout(Shape<Int<32>, Int<kTileN>>{}, GenRowMajor{})));
+        composition(SmemLayoutKV{}, make_layout(Shape<Int<32>, Int<kBlockN>>{}, GenRowMajor{})));
   using SmemLayoutVtransposedNoSwizzle = decltype(get_nonswizzle_portion(SmemLayoutVtransposed{}));
 
   // shared memory to register copy
   using SmemCopyAtomTransposed = Copy_Atom<SM75_U16x8_LDSM_T, T>; 
   
+
+  using MMA_Atom_Arch = std::conditional_t<
+        std::is_same_v<T, cutlass::half_t>,
+        MMA_Atom<SM80_16x8x16_F32F16F16F32_TN>,
+        MMA_Atom<SM80_16x8x16_F32BF16BF16F32_TN>
+    >;
   
   // tiled mma
   using TiledMma = TiledMMA<
-        MMA_Atom<SM80_16x8x16_F32F16F16F32_TN>,
+        MMA_Atom_Arch,
         Layout<Shape<_1, Int<4>, _1>>,  // 4x1x1 or 8x1x1 thread group
         Tile<_16, 
              Layout<Shape <_8,_4,_2>,
@@ -103,12 +110,12 @@ struct Kernel_traits {
         >;
 
   using TiledMma_PV = TiledMMA<
-        MMA_Atom<SM80_16x8x16_F32F16F16F32_TN>,
+        MMA_Atom_Arch,
         Layout<Shape<_1, _1, Int<kNWarps>>>,  // 4x1x1 or 8x1x1 thread group
         Tile<_16, _16, Int<16 * kNWarps>>>;
 
-  using SmemLayoutLse = Layout<Shape<Int<kNWarps>, Int<kTileM>>,
-                               Stride<Int<kTileM>, _1>>;
+  using SmemLayoutLse = Layout<Shape<Int<kNWarps>, Int<kBlockM>>,
+                               Stride<Int<kBlockM>, _1>>;
 
   struct TensorStorage
   {
