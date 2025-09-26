@@ -187,6 +187,22 @@ __global__ void shfl_example(int* data, int* t) {
       }
     }
 
+    uint8_t v_[2];
+    v_[0] = 17;
+    v_[1] = 17;
+    cutlass::half_t* v_h = reinterpret_cast<cutlass::half_t*>(v_);
+    printf("_h is %f\n", static_cast<float>(v_h[0]));
+
+
+    uint8_t first = 1;
+    uint8_t second = 2;
+
+    second = (second & 0x0F) << 4;
+    first = first & 0x0F;
+    second = second | first;
+
+    printf("b is %d\n", static_cast<uint32_t>(second));
+
     //printf("a is %f, b is %f, c is %f, d is %f\n", a, b, c, d);
 }
 

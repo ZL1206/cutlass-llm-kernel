@@ -1,0 +1,327 @@
+smem_size_per_sm is 233472
+smem_size is 229504
+num_threads is 256
+TiledMMA
+  ThrLayoutVMNK:  (_128,_2,_1,_1):(_1,_128,_0,_0)
+  PermutationMNK: (_,_,_)
+MMA_Atom
+  ThrID:      _128:_1
+  Shape_MNK:  (_64,_192,_16)
+  LayoutA_TV: (_128,(_64,_16)):(_0,(_1,_64))
+  LayoutB_TV: (_128,(_192,_16)):(_0,(_1,_192))
+  LayoutC_TV: ((_4,_8,_4),(_2,_2,_24)):((_128,_1,_16),(_64,_8,_512))
+mA: ArithTuple(_0,_0) o (256,1024):(_1@1,_1@0)
+mB: ArithTuple(_0,_0) o (192,1024):(_1@1,_1@0)
+gA: ArithTuple(_0,0) o (_256,_128,8):(_1@1,_1@0,_128@0)
+gB: ArithTuple(_0,0) o (_192,_128,8):(_1@1,_1@0,_128@0)
+tAgA: ArithTuple(_0,0) o (((_64,_256),_2),8):(((_1@0,_1@1),_64@0),_128@0)
+tAsA: Sw<3,4,3>_smem_ptr[16b](0x7fb000000400) o ((_16384,_2),(_1,_2)):((_1,_16384),(_0,_32768))
+tBgB: ArithTuple(_0,0) o (((_64,_192),_2),8):(((_1@0,_1@1),_64@0),_128@0)
+tBsB: Sw<3,4,3>_smem_ptr[16b](0x7fb000020400) o ((_12288,_2),(_1,_2)):((_1,_12288),(_0,_24576))
+kTmaTransactionBytes is 114688
+tCsA: Sw<3,4,3>_smem_ptr[16b](0x7fb000000400) o ((_64,_16),_2,(_4,_2),(_1,_2)):((_64,_1),_8192,(_16,_16384),(_0,_32768))
+tCsB: Sw<3,4,3>_smem_ptr[16b](0x7fb000020400) o ((_192,_16),_1,(_4,_2),(_1,_2)):((_64,_1),_0,(_16,_12288),(_0,_24576))
+tCrC: ptr[32b](0x7faf81fff9d0) o ((_2,_2,_24),_2,_1):((_1,_2,_4),_96,_0)
+tCrA: GMMA::DescriptorIterator o (_1,_2,(_4,_2),(_1,_2)):(_0,_1024,(_2,_2048),(_0,_4096))
+tCrB: GMMA::DescriptorIterator o (_1,_1,(_4,_2),(_1,_2)):(_0,_0,(_2,_1536),(_0,_3072))
+read_pipe 0, phase 0
+read_pipe 1, phase 0
+read_pipe 0, phase 1
+read_pipe 1, phase 1
+read_pipe 0, phase 0
+read_pipe 1, phase 0
+read_pipe 0, phase 1
+read_pipe 1, phase 1
+tCrC m 0:
+ptr[32b](0x7faf81fff9d0) o ((_2,_2,_24)):((_1,_2,_4)):
+  2.33e+01
+ -2.56e+01
+  8.27e+01
+ -7.81e+00
+ -2.51e+01
+ -3.84e+00
+  2.30e+01
+ -2.33e+01
+  4.40e+01
+  8.99e+00
+  7.33e+01
+ -5.75e+01
+  3.69e+01
+  7.84e-01
+ -3.99e+00
+ -1.04e+01
+ -1.05e+01
+ -9.11e+00
+ -3.99e+01
+ -1.11e+01
+ -9.68e+00
+ -8.04e+00
+  5.52e+01
+ -1.25e+01
+ -4.03e+00
+  1.48e+01
+ -1.64e+01
+ -1.42e+01
+  3.02e+00
+  3.36e+01
+  2.42e+01
+ -1.31e+01
+ -1.06e+01
+ -4.23e+01
+  4.37e+01
+ -4.74e+01
+ -3.33e+00
+ -3.52e+01
+ -1.91e+01
+  2.52e+01
+  2.25e+01
+ -5.06e+01
+ -1.47e+01
+  1.12e-01
+  9.73e+00
+ -5.43e+01
+ -5.86e+00
+  1.46e+01
+ -8.18e+00
+ -1.74e+01
+ -4.21e+01
+ -4.14e+01
+ -2.95e+01
+  9.52e+00
+ -3.20e+00
+  4.55e+01
+ -3.33e+01
+  1.25e+01
+ -3.54e+00
+  3.38e+01
+  3.92e+01
+  1.78e+01
+  2.52e+01
+  4.82e+01
+ -5.95e+00
+ -4.84e+01
+  5.81e+00
+  4.26e+01
+  2.51e+00
+ -6.09e+01
+  3.75e+01
+  7.43e+00
+ -5.58e+01
+  3.41e+01
+ -3.85e+01
+ -2.41e+01
+  1.68e+01
+  6.10e+01
+  4.94e-01
+  1.31e+00
+  8.00e+00
+  1.20e+01
+  3.42e+01
+ -2.94e+01
+ -5.51e+01
+  5.11e+01
+  4.44e+01
+  2.56e+01
+ -1.86e+00
+ -3.26e+01
+ -7.10e+00
+  1.05e+00
+ -3.45e+01
+  5.72e+01
+  5.45e+00
+  4.84e+01
+ref_out:
+m = 0:
+tensor(23.3125, device='cuda:0', dtype=torch.float16)
+tensor(-25.6406, device='cuda:0', dtype=torch.float16)
+tensor(82.6875, device='cuda:0', dtype=torch.float16)
+tensor(-7.8086, device='cuda:0', dtype=torch.float16)
+tensor(-25.1094, device='cuda:0', dtype=torch.float16)
+tensor(-3.8418, device='cuda:0', dtype=torch.float16)
+tensor(23.0156, device='cuda:0', dtype=torch.float16)
+tensor(-23.3125, device='cuda:0', dtype=torch.float16)
+tensor(44.0312, device='cuda:0', dtype=torch.float16)
+tensor(8.9922, device='cuda:0', dtype=torch.float16)
+tensor(73.3750, device='cuda:0', dtype=torch.float16)
+tensor(-57.5000, device='cuda:0', dtype=torch.float16)
+tensor(36.9375, device='cuda:0', dtype=torch.float16)
+tensor(0.7847, device='cuda:0', dtype=torch.float16)
+tensor(-3.9863, device='cuda:0', dtype=torch.float16)
+tensor(-10.3828, device='cuda:0', dtype=torch.float16)
+tensor(-10.5156, device='cuda:0', dtype=torch.float16)
+tensor(-9.1172, device='cuda:0', dtype=torch.float16)
+tensor(-39.8750, device='cuda:0', dtype=torch.float16)
+tensor(-11.1250, device='cuda:0', dtype=torch.float16)
+tensor(-9.6797, device='cuda:0', dtype=torch.float16)
+tensor(-8.0391, device='cuda:0', dtype=torch.float16)
+tensor(55.1875, device='cuda:0', dtype=torch.float16)
+tensor(-12.5312, device='cuda:0', dtype=torch.float16)
+tensor(-4.0273, device='cuda:0', dtype=torch.float16)
+tensor(14.7578, device='cuda:0', dtype=torch.float16)
+tensor(-16.4531, device='cuda:0', dtype=torch.float16)
+tensor(-14.2188, device='cuda:0', dtype=torch.float16)
+tensor(3.0195, device='cuda:0', dtype=torch.float16)
+tensor(33.6562, device='cuda:0', dtype=torch.float16)
+tensor(24.2188, device='cuda:0', dtype=torch.float16)
+tensor(-13.0859, device='cuda:0', dtype=torch.float16)
+tensor(-10.6016, device='cuda:0', dtype=torch.float16)
+tensor(-42.2500, device='cuda:0', dtype=torch.float16)
+tensor(43.6562, device='cuda:0', dtype=torch.float16)
+tensor(-47.3438, device='cuda:0', dtype=torch.float16)
+tensor(-3.3281, device='cuda:0', dtype=torch.float16)
+tensor(-35.2188, device='cuda:0', dtype=torch.float16)
+tensor(-19.0625, device='cuda:0', dtype=torch.float16)
+tensor(25.2031, device='cuda:0', dtype=torch.float16)
+tensor(22.4531, device='cuda:0', dtype=torch.float16)
+tensor(-50.5938, device='cuda:0', dtype=torch.float16)
+tensor(-14.7109, device='cuda:0', dtype=torch.float16)
+tensor(0.1124, device='cuda:0', dtype=torch.float16)
+tensor(9.7266, device='cuda:0', dtype=torch.float16)
+tensor(-54.3125, device='cuda:0', dtype=torch.float16)
+tensor(-5.8594, device='cuda:0', dtype=torch.float16)
+tensor(14.6250, device='cuda:0', dtype=torch.float16)
+tensor(-8.1797, device='cuda:0', dtype=torch.float16)
+tensor(-17.3906, device='cuda:0', dtype=torch.float16)
+tensor(-42.0938, device='cuda:0', dtype=torch.float16)
+tensor(-41.4062, device='cuda:0', dtype=torch.float16)
+tensor(-29.5156, device='cuda:0', dtype=torch.float16)
+tensor(9.5156, device='cuda:0', dtype=torch.float16)
+tensor(-3.2012, device='cuda:0', dtype=torch.float16)
+tensor(45.4688, device='cuda:0', dtype=torch.float16)
+tensor(-33.2812, device='cuda:0', dtype=torch.float16)
+tensor(12.5469, device='cuda:0', dtype=torch.float16)
+tensor(-3.5391, device='cuda:0', dtype=torch.float16)
+tensor(33.7812, device='cuda:0', dtype=torch.float16)
+tensor(39.1875, device='cuda:0', dtype=torch.float16)
+tensor(17.7812, device='cuda:0', dtype=torch.float16)
+tensor(25.2188, device='cuda:0', dtype=torch.float16)
+tensor(48.2500, device='cuda:0', dtype=torch.float16)
+tensor(-5.9492, device='cuda:0', dtype=torch.float16)
+tensor(-48.3750, device='cuda:0', dtype=torch.float16)
+tensor(5.8047, device='cuda:0', dtype=torch.float16)
+tensor(42.5625, device='cuda:0', dtype=torch.float16)
+tensor(2.5059, device='cuda:0', dtype=torch.float16)
+tensor(-60.9375, device='cuda:0', dtype=torch.float16)
+tensor(37.5000, device='cuda:0', dtype=torch.float16)
+tensor(7.4258, device='cuda:0', dtype=torch.float16)
+tensor(-55.7812, device='cuda:0', dtype=torch.float16)
+tensor(34.1250, device='cuda:0', dtype=torch.float16)
+tensor(-38.4688, device='cuda:0', dtype=torch.float16)
+tensor(-24.1406, device='cuda:0', dtype=torch.float16)
+tensor(16.8281, device='cuda:0', dtype=torch.float16)
+tensor(61., device='cuda:0', dtype=torch.float16)
+tensor(0.4944, device='cuda:0', dtype=torch.float16)
+tensor(1.3076, device='cuda:0', dtype=torch.float16)
+tensor(7.9961, device='cuda:0', dtype=torch.float16)
+tensor(11.9688, device='cuda:0', dtype=torch.float16)
+tensor(34.2500, device='cuda:0', dtype=torch.float16)
+tensor(-29.3750, device='cuda:0', dtype=torch.float16)
+tensor(-55.1250, device='cuda:0', dtype=torch.float16)
+tensor(51.1562, device='cuda:0', dtype=torch.float16)
+tensor(44.4062, device='cuda:0', dtype=torch.float16)
+tensor(25.5938, device='cuda:0', dtype=torch.float16)
+tensor(-1.8574, device='cuda:0', dtype=torch.float16)
+tensor(-32.6562, device='cuda:0', dtype=torch.float16)
+tensor(-7.0977, device='cuda:0', dtype=torch.float16)
+tensor(1.0537, device='cuda:0', dtype=torch.float16)
+tensor(-34.4688, device='cuda:0', dtype=torch.float16)
+tensor(57.1875, device='cuda:0', dtype=torch.float16)
+tensor(5.4531, device='cuda:0', dtype=torch.float16)
+tensor(48.3750, device='cuda:0', dtype=torch.float16)
+m = 1:
+tensor(-25.1250, device='cuda:0', dtype=torch.float16)
+tensor(8.6016, device='cuda:0', dtype=torch.float16)
+tensor(6.4062, device='cuda:0', dtype=torch.float16)
+tensor(-21.0312, device='cuda:0', dtype=torch.float16)
+tensor(67.4375, device='cuda:0', dtype=torch.float16)
+tensor(12.8672, device='cuda:0', dtype=torch.float16)
+tensor(4.4297, device='cuda:0', dtype=torch.float16)
+tensor(1.9531, device='cuda:0', dtype=torch.float16)
+tensor(-42.9375, device='cuda:0', dtype=torch.float16)
+tensor(50.7500, device='cuda:0', dtype=torch.float16)
+tensor(44.0625, device='cuda:0', dtype=torch.float16)
+tensor(-31.1406, device='cuda:0', dtype=torch.float16)
+tensor(9.0781, device='cuda:0', dtype=torch.float16)
+tensor(18.6094, device='cuda:0', dtype=torch.float16)
+tensor(52.9375, device='cuda:0', dtype=torch.float16)
+tensor(0.9312, device='cuda:0', dtype=torch.float16)
+tensor(31.7188, device='cuda:0', dtype=torch.float16)
+tensor(-13.1016, device='cuda:0', dtype=torch.float16)
+tensor(2.6074, device='cuda:0', dtype=torch.float16)
+tensor(15.9609, device='cuda:0', dtype=torch.float16)
+tensor(-3.2754, device='cuda:0', dtype=torch.float16)
+tensor(15.6328, device='cuda:0', dtype=torch.float16)
+tensor(-51.3750, device='cuda:0', dtype=torch.float16)
+tensor(-9.4609, device='cuda:0', dtype=torch.float16)
+tensor(-0.6938, device='cuda:0', dtype=torch.float16)
+tensor(-69.5000, device='cuda:0', dtype=torch.float16)
+tensor(2.6758, device='cuda:0', dtype=torch.float16)
+tensor(-39.1562, device='cuda:0', dtype=torch.float16)
+tensor(24.8281, device='cuda:0', dtype=torch.float16)
+tensor(-42.4688, device='cuda:0', dtype=torch.float16)
+tensor(42.9062, device='cuda:0', dtype=torch.float16)
+tensor(18.6875, device='cuda:0', dtype=torch.float16)
+tensor(11.1797, device='cuda:0', dtype=torch.float16)
+tensor(-46.7812, device='cuda:0', dtype=torch.float16)
+tensor(52.7500, device='cuda:0', dtype=torch.float16)
+tensor(16.1250, device='cuda:0', dtype=torch.float16)
+tensor(28.5156, device='cuda:0', dtype=torch.float16)
+tensor(-20.9688, device='cuda:0', dtype=torch.float16)
+tensor(-8.6953, device='cuda:0', dtype=torch.float16)
+tensor(3.7500, device='cuda:0', dtype=torch.float16)
+tensor(-69.1250, device='cuda:0', dtype=torch.float16)
+tensor(9.7734, device='cuda:0', dtype=torch.float16)
+tensor(-20.9062, device='cuda:0', dtype=torch.float16)
+tensor(20.6406, device='cuda:0', dtype=torch.float16)
+tensor(24.3125, device='cuda:0', dtype=torch.float16)
+tensor(-17.5312, device='cuda:0', dtype=torch.float16)
+tensor(-26.6094, device='cuda:0', dtype=torch.float16)
+tensor(-5.8594, device='cuda:0', dtype=torch.float16)
+tensor(44.6562, device='cuda:0', dtype=torch.float16)
+tensor(-39.7812, device='cuda:0', dtype=torch.float16)
+tensor(25.6562, device='cuda:0', dtype=torch.float16)
+tensor(9.0625, device='cuda:0', dtype=torch.float16)
+tensor(-21.2969, device='cuda:0', dtype=torch.float16)
+tensor(21.8594, device='cuda:0', dtype=torch.float16)
+tensor(-21.7812, device='cuda:0', dtype=torch.float16)
+tensor(-13.7734, device='cuda:0', dtype=torch.float16)
+tensor(-27.2500, device='cuda:0', dtype=torch.float16)
+tensor(22.7656, device='cuda:0', dtype=torch.float16)
+tensor(51.4062, device='cuda:0', dtype=torch.float16)
+tensor(-16.1250, device='cuda:0', dtype=torch.float16)
+tensor(10.4766, device='cuda:0', dtype=torch.float16)
+tensor(-40.6562, device='cuda:0', dtype=torch.float16)
+tensor(-52., device='cuda:0', dtype=torch.float16)
+tensor(-81.5625, device='cuda:0', dtype=torch.float16)
+tensor(-47.7188, device='cuda:0', dtype=torch.float16)
+tensor(-20.5781, device='cuda:0', dtype=torch.float16)
+tensor(22.5312, device='cuda:0', dtype=torch.float16)
+tensor(19.9219, device='cuda:0', dtype=torch.float16)
+tensor(-35.5312, device='cuda:0', dtype=torch.float16)
+tensor(-43.3125, device='cuda:0', dtype=torch.float16)
+tensor(-16.4062, device='cuda:0', dtype=torch.float16)
+tensor(20.9688, device='cuda:0', dtype=torch.float16)
+tensor(19.8906, device='cuda:0', dtype=torch.float16)
+tensor(29.7969, device='cuda:0', dtype=torch.float16)
+tensor(-23.7188, device='cuda:0', dtype=torch.float16)
+tensor(-40.3750, device='cuda:0', dtype=torch.float16)
+tensor(13.0625, device='cuda:0', dtype=torch.float16)
+tensor(5.5312, device='cuda:0', dtype=torch.float16)
+tensor(-33.3438, device='cuda:0', dtype=torch.float16)
+tensor(-23.5156, device='cuda:0', dtype=torch.float16)
+tensor(27.6562, device='cuda:0', dtype=torch.float16)
+tensor(-8.7891, device='cuda:0', dtype=torch.float16)
+tensor(4.2617, device='cuda:0', dtype=torch.float16)
+tensor(53.5938, device='cuda:0', dtype=torch.float16)
+tensor(43.9062, device='cuda:0', dtype=torch.float16)
+tensor(-36.6250, device='cuda:0', dtype=torch.float16)
+tensor(-55.6875, device='cuda:0', dtype=torch.float16)
+tensor(48.5312, device='cuda:0', dtype=torch.float16)
+tensor(-26.5938, device='cuda:0', dtype=torch.float16)
+tensor(-15.1094, device='cuda:0', dtype=torch.float16)
+tensor(23.5469, device='cuda:0', dtype=torch.float16)
+tensor(-25.0156, device='cuda:0', dtype=torch.float16)
+tensor(44.3125, device='cuda:0', dtype=torch.float16)
+tensor(9.0469, device='cuda:0', dtype=torch.float16)
+tensor(-6.4375, device='cuda:0', dtype=torch.float16)
+tensor(-39.2188, device='cuda:0', dtype=torch.float16)
